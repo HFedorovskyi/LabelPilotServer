@@ -1,0 +1,128 @@
+{% extends 'base.html' %}
+{% load label_custom_filters %}
+{% load static %}
+{% block content %}
+    <link rel="stylesheet" href="{% static 'LabelTemplates/style.css' %}">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <div class="projects-section">
+        <div class="container-fluid">
+            <div class="row">
+                  <div class="col-6 d-flex align-items-center">
+                      <a href="/label_templates/create_label/" class="btn btn-primary bg-gradient rounded-4">Новый шаблон</a>
+                  </div>
+                    <!-- Кнопка "Выгрузка на станции" справа -->
+                  <div class="col-6 d-flex justify-content-end align-items-center">
+                      <button class="btn btn-primary bg-gradient rounded-4" id="sendToStationsBtn" data-bs-toggle="modal" data-bs-target="#sendBarcodeModal">Выгрузка на станции</button>
+                  </div>
+            </div>
+            <div class="row mt-4">
+                {% if labels %}
+                    {% for item in labels %}
+                        <div class="col-sm-3 mb-3 mb-sm-3">
+                            <div class="card rounded-4">
+                                <div class="card-body">
+                                    <h4 class="card-title text-center">Шаблон - {{ item.name }}</h4>
+                                    <p class="card-text"><b>Создано</b> - {{ item.created|parse_and_format_datetime:"%d.%m.%Y %H:%M" }}</p>
+                                    <p class="card-text"><b>Последнее редактирование</b> - {{ item.edited|parse_and_format_datetime:"%d.%m.%Y %H:%M" }}</p>
+                                    <div class="row">
+                                        <div class="col">
+                                        <a href="{% url 'LabelTemplates:edit_label' label_id=item.id %}" class="btn btn-primary bg-gradient rounded-4" data-field-id="{{ item.id }}">Изменить</a>
+                                        </div>
+                                        <div class="col d-flex justify-content-end">
+                                            <a href="#" class="btn btn-danger bg-gradient rounded-4 deleteLabel" data-field-id="{{ item.id }}">Удалить</a>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    {% endfor %}
+                {% else %}
+                    <p> Ещё не создано ни одной этикетки</p>
+                {% endif %}
+            </div>
+            <div class="toast-container position-fixed bottom-0 end-0 p-3">
+              <div id="liveToastDeleteLabel" class="toast" role="alert" aria-live="assertive" aria-atomic="true">
+                <div class="toast-header">
+                  
+                  <strong class="me-auto">Уведомление</strong>
+                  <small>Сейчас</small>
+                  <button type="button" class="btn-close" data-bs-dismiss="toast" aria-label="Close"></button>
+                </div>
+                <div class="toast-body">
+                  Шаблон этикетки удалён!
+                </div>
+              </div>
+            </div>
+            <div class="modal fade modal-xl" id="sendBarcodeModal" tabindex="-1" aria-labelledby="editTextModalLabel" aria-hidden="true">
+              <div class="modal-dialog">
+                  <div class="modal-content">
+                    <div class="modal-header">
+                      <h5 class="modal-card-title text-center w-100">Передача номенклатуры на стании маркировки</h5>
+                    </div>
+                    <section class="modal-card-body">
+                    <div class="row mt-2">
+                        <div class="col">
+                            <div>
+                                  <input class="form-check-input" type="checkbox" id="checkbox-AllStations" value="" aria-label="...">
+                            </div>
+                        </div>
+                        <div class="col">
+                            <h6>Статус</h6>
+                        </div>
+                        <div class="col">
+                            <h6>Станция</h6>
+                        </div>
+                        <div class="col">
+                            <h6>UUID станции</h6>
+                        </div>
+                    </div>
+                        <div class="card mt-2 mb-2">
+                            <div class="card-body">
+                                {% for item in stations %}
+                                <div class="row mb-2 mt-2 rounded" style="background-color: #e9e7fd" data-uuid="{{ item.station_uuid }}" id="station-{{ item.station_uuid }}">
+                                    <div class="col align-content-center">
+                                        <div>
+                                          <input class="form-check-input" type="checkbox" id="checkbox-{{ item.station_uuid }}" value="" aria-label="...">
+                                        </div>
+                                    </div>
+                                     {% if item.is_online %}
+                                        <div class="col align-content-center" id="online-status-{{ item.stations_uuid }}">
+                                            <div class="participants" id="connection-status">
+                                                <dotlottie-player src="https://lottie.host/0b3cadf9-38da-439b-a106-a05f19b5d43a/9HHLpSV9fj.json" background="transparent" speed="1" style="width: 30px; height: 30px;" loop autoplay></dotlottie-player>
+                                                <p class="align-middle" style="margin-top: 1rem">Статус подключения: Online</p>
+                                            </div>
+                                        </div>
+                                    {% else %}
+                                        <div class="col align-content-center" id="offline-status-{{ item.station_uuid }}">
+                                            <div class="participants" id="connection-status">
+                                                <dotlottie-player src="https://lottie.host/de9da52a-54d9-4639-a22e-dbab047b77dc/bJEOrrnABg.json" background="transparent" speed="1" style="width: 30px; height: 30px;" loop autoplay></dotlottie-player>
+                                                <p class="align-middle" style="margin-top: 1rem">Статус подключения: Offline</p>
+                                            </div>
+                                        </div>
+                                    {% endif %}
+                                    <div class="col align-content-center">
+                                        {{ item.station_name }}
+                                    </div>
+                                     <div class="col">
+                                        {{ item.station_uuid}}
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </section>
+                    <footer class="modal-card-foot">
+                      <div class="buttons">
+                          <button type="button" class="btn btn-primary rounded-pill bg-gradient" id="sendToStations">Передать на станции</button>
+                          <button type="button" class="btn btn-primary rounded-pill bg-gradient" id="cancelNomenclatureButton" data-bs-toggle="modal"  data-bs-target="sendBarcodeModal">Выход</button>
+                      </div>
+                    </footer>
+                    <div class="box is-hidden has-background-danger-light" id="errorBox"></div>
+                  </div>
+              </div>
+            </div>
+        </div>
+    </div>
+    <script src="{% static  'LabelTemplates/label_templates_list_script.js' %}"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+{% endblock %}

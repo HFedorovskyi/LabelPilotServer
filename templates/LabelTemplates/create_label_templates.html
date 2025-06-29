@@ -1,0 +1,419 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    {% load static %}
+    {% load json_serilization %}
+    <meta charset="UTF-8">
+    <title>Редактор этикеток</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="{% static 'styles.css' %}">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet" integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH" crossorigin="anonymous">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <link rel="stylesheet" href="{% static 'LabelTemplates/style.css' %}">
+    
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            height: 100%;
+            width: 100%;
+            font-family: Arial, sans-serif;
+        }
+        
+        .container-fluid {
+            height: 100vh; /* Высота на весь экран */
+            display: flex;
+        }
+        
+        .col-8 {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 0;
+            height: 100%;
+        }
+        
+        #canvas-container {
+            position: relative; /* Обязательно для абсолютного позиционирования панели внутри */
+            width: 100%;
+            height: 100%;
+            background-color: #f0f0f0;
+            overflow: auto; /* Для прокрутки внутри контейнера */
+        }
+        
+        canvas {
+            border: 1px solid #ccc;
+            max-width: 100%;
+            max-height: 100%;
+        }
+        
+        #text-format-toolbar {
+            position: sticky;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 60px; /* Фиксированная высота панели */
+            background-color: rgba(255, 255, 255, 0.9);
+            padding: 5px;
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+        } 
+        .custom-row {
+          --bs-gutter-x: 0.1rem; /* Задаем собственный gutter, например 0.5rem */
+        }
+        
+
+    </style>
+</head>
+<body>
+<div class="container-fluid" style="background-color: #f3f6fd">
+    <div class="row flex-grow-1 w-100">
+        <div class="col-2">
+            <div class="row align-items-center">
+                <div class="col md-6">
+                    <img src="/static/icons/printer_ztal8w3rcad8.svg" style="width: 50px; height:50px" alt="...">
+                </div>
+            </div>
+            <div class="row g-0 mb-2 mt-2">
+                <div class="card rounded-5">
+                  <div class="card-header rounded-top-5 text-center bg-primary-subtle bg-gradient">
+                    Текстовые поля
+                  </div>
+                  <div class="card-body">
+                    <div class="form-floating">
+                      <select class="form-select rounded-3" id="floatingSelectTextbox" aria-label="Floating label select example" onchange="changeDiv()">
+                          <option selected>Выбор типа поля...</option>
+                          <option value="1">Неизменяемое текстовое поле</option>
+                          <option value="2">Динамическое текстовое поле</option>
+                          <option value="3">Номенклатура</option>
+                          <option value="4">Артикул</option>
+                          <option value="5">Оператор</option>
+                          <option value="6">Вес нетто упаковки</option>
+                          <option value="7">Вес брутто упаковки</option>
+                          <option value="9">Дата производства</option>
+                          <option value="10">Годен до</option>
+                          <option value="11">Вес нетто короб</option>
+                          <option value="12">Вес брутто короб</option>
+                          <option value="13">Вес нетто паллет</option>
+                          <option value="14">Вес брутто паллет</option>
+                          <option value="15">Номер упаковки</option>
+                          <option value="16">Номер короба</option>
+                          <option value="17">Номер паллета</option>
+                          <option value="18">Количество упаковок</option>
+                          <option value="19">Количество коробов</option>
+                          <option value="20">Номер партии</option>
+                          
+                          
+                          
+                      </select>
+                      <label for="floatingSelectTextbox">Тип поля</label>
+                    </div>
+                    <div id="div1" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="custom-textbox">Добавить поле</button>
+                    </div>
+                    <div id="div2" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="dynamic-textbox">Добавить динамическое поле</button>
+                    </div> 
+                    <div id="div3" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <select class="form-select rounded-3 mt-2 mb-2" id="nomenclatureSelect" aria-label="Floating label select example">
+                        <option selected disabled>Выбор номенклатуры...</option>
+                            {% for item in nomenclatures %}
+                                <option 
+                                    value="{{ item.id }}" 
+                                    data-all='{{ item|to_json }}'
+                                >
+                                    {{ item.name }}
+                                </option>
+                            {% endfor %}
+                        </select>
+                        <button type="button" class="btn btn-primary rounded-4" id="addNomenclatureBtn">Добавить поле названия номенклатуры</button>
+                    </div>
+                    <div id="div4" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addArticleButton">Добавить поле 'Артикул'</button>
+                    </div>  
+                    <div id="div5" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addOperatorButton">Добавить поле 'Оператор'</button>
+                    </div> 
+                    <div id="div6" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addWeightNettoPackBtn">Добавить поле "Вес нетто упаковки"</button>
+                    </div> 
+                    <div id="div7" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addWeightBruttoPackBtn">Добавить поле "Вес брутто упаковки"</button>
+                    </div>
+                    <div id="div9" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <div class="form-floating">
+                            <select class="form-select rounded-3 mt-2 mb-2" id="dateFormatSelect" aria-label="Floating label select example">
+                                <option value="dd.MM.yyyy" selected>DD.MM.YYYY</option>
+                                <option value="dd/MM/yyyy">DD/MM/YYYY</option>
+                                <option value="dd-MM-yyyy">DD-MM-YYYY</option>
+                                <option value="dd MMM yyyy">DD MMM YYYY</option>
+                                <option value="MM.yyyy">MM.YYYY</option>
+                                <option value="yyyy-MM-dd">YYYY-MM-DD</option>
+                            </select>
+                            <label for="dateFormatSelect">Тип поля</label>
+                        </div> 
+                        <button type="button" class="btn btn-primary rounded-4" id="addProductionDateButton">Добавить поле "Дата производства"</button>
+                    </div> 
+                    <div id="div10" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <div class="form-floating">
+                            <select class="form-select rounded-3 mt-2 mb-2" id="expDateFormatSelect" aria-label="Floating label select example">
+                                <option value="dd.MM.yyyy" selected>DD.MM.YYYY</option>
+                                <option value="dd/MM/yyyy">DD/MM/YYYY</option>
+                                <option value="dd-MM-yyyy">DD-MM-YYYY</option>
+                                <option value="dd MMM yyyy">DD MMM YYYY</option>
+                                <option value="MM.yyyy">MM.YYYY</option>
+                                <option value="yyyy-MM-dd">YYYY-MM-DD</option>
+                            </select>
+                            <label for="dateFormatSelect">Тип поля</label>
+                        </div> 
+                        <button type="button" class="btn btn-primary rounded-4" id="addExpDateButton">Добавить поле "Годен до"</button>
+                    </div>
+                    <div id="div11" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addWeightNettoBoxBtn">Добавить поле "Вес нетто короба"</button>
+                    </div>
+                    <div id="div12" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addWeightBruttoBoxBtn">Добавить поле "Вес брутто короба"</button>
+                    </div>
+                    <div id="div13" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addWeightNettoPalletBtn">Добавить поле "Вес нетто паллета"</button>
+                    </div>
+                    <div id="div14" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addWeightBruttoPalletBtn">Добавить поле "Вес брутто паллета"</button>
+                    </div>
+                    <div id="div15" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addPackNumberBtn">Добавить поле "Номер упаковки"</button>
+                    </div>
+                    <div id="div16" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addBoxNumberBtn">Добавить поле "Номер короба"</button>
+                    </div>
+                    <div id="div17" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addPalletNumberBtn">Добавить поле "Номер паллета"</button>
+                    </div>
+                    <div id="div18" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addPackCountBtn">Добавить поле "Количество упаковок"</button>
+                    </div>
+                    <div id="div19" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addBoxCountBtn">Добавить поле "Количество коробов"</button>
+                    </div>
+                    <div id="div20" class="dynamic-div mb-2 mt-3" style="display: none;">
+                        <button type="button" class="btn btn-primary rounded-4" id="addBatchNumberBtn">Добавить поле "Номер партии"</button>
+                    </div>
+                  </div>
+                </div>
+            </div>
+            
+            <div class="row g-0 mb-2 mt-2">
+                <div class="card rounded-5">
+                  <div class="card-header rounded-top-5 text-center bg-primary-subtle bg-gradient">
+                    Штрихкод
+                  </div>
+                  <div class="card-body">
+                    <div class="form-floating">
+                            <select class="form-select rounded-3 mt-2 mb-2" id="barcodeSelect" aria-label="Floating label select example">
+                                {% for item in barcodes %}
+                                    <option value="{{ item.id }}" data-name="{{ item.name }}"  data-structure="{{ item.structure }}">{{ item.name }}</option>
+                                {% endfor %}
+                            </select>
+                            <label for="barcodeSelect">Выбор шаблона штрихкода</label>
+                        </div>
+                  <button type="button" class="btn btn-primary rounded-4" id="addBarcodeButton">
+                      Добавить штрихкод
+                      <span class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
+                      <span class="d-none" role="status">Loading...</span>
+                  </button>
+                  </div>
+                
+                </div>
+            </div>
+            <div class="row g-0 mb-2 mt-2">
+                <div class="card rounded-5">
+                  <div class="card-header rounded-top-5 text-center bg-primary-subtle bg-gradient">
+                    Фигуры
+                  </div>
+                  <div class="card-body">
+                    <div class="form-floating">
+                            <select class="form-select rounded-3 mt-2 mb-2" id="barcodeSelect" aria-label="Floating label select example">
+                                {% for item in barcodes %}
+                                    <option value="{{ item.id }}" data-type="{{ item.Type_barcode }}" data-structure="{{ item.Structure }}">{{ item.Name }}</option>
+                                {% endfor %}
+                            </select>
+                            <label for="barcodeSelect">Выбор шаблона штрихкода</label>
+                        </div>
+                  <button type="button" class="btn btn-primary rounded-4" id="addBarcodeButton">Добавить штрихкод</button>
+                  </div>
+                
+                </div>
+            </div>
+            <div class="row g-0 mb-2 mt-2">
+                <div class="card rounded-5">
+                  <div class="card-header rounded-top-5 text-center bg-primary-subtle bg-gradient">
+                    Изображения
+                  </div>
+                  <div class="card-body">
+                        <div class="form-floating">
+                                <select class="form-select rounded-3 mt-2 mb-2 " id="barcodeSelect" aria-label="Floating label select example">
+                                    {% for item in barcodes %}
+                                        <option value="{{ item.id }}" data-type="{{ item.Type_barcode }}" data-structure="{{ item.Structure }}">{{ item.Name }}</option>
+                                    {% endfor %}
+                                </select>
+                                <label for="barcodeSelect">Выбор шаблона штрихкода</label>
+                        </div>
+                        <button type="button" class="btn btn-primary rounded-4" id="addBarcodeButton">Добавить штрихкод</button>
+                  </div>
+                
+                </div>
+            <div class="row g-0 mb-2 mt-4">
+                <button id="show-json" class="btn btn-secondary mt-3">Показать JSON</button>
+            </div>
+            
+            </div>
+        </div>
+        
+       <div class="col-8" style="background-color: rgba(232, 232, 232, 0.9);">
+            <div id="canvas-container">
+                <button class="btn btn-primary d-none" type="button" data-bs-toggle="collapse" data-bs-target="#text-format-toolbar" id="text-toolbar-toggle"></button>
+                <div id="text-format-toolbar" class="toolbar">
+
+                    <div id="toolbar-buttons" class="collapse">
+                        <div class="d-flex justify-content-center align-items-center">
+                            <div class="row align-items-center gx-0 gap-2 ms-0">
+                                <div class="col-auto">
+                                    <div class="d-flex align-items-center">
+                                        <label for="fontSize" class="mb-0 me-1">
+                                          <i class="bi bi-type" style="font-size: 28px;"></i>
+                                        </label>
+                                        <input
+                                          type="number"
+                                          class="form-control form-control-sm custom-input"
+                                          id="fontSize"
+                                          value=""
+                                          step="1"
+                                          min="1"
+                                        >
+                                  </div>
+                                </div>
+                                <div class="col-auto">
+                                    <select class="form-select form-select-sm" aria-label="Large select example" id="fontSelect">
+                                        <option value="Arial">Arial</option>
+                                        <option value="Verdana">Verdana</option>
+                                        <option value="Tahoma">Tahoma</option>
+                                        <option value="Trebuchet MS">Trebuchet MS</option>
+                                        <option value="Calibri">Calibri</option>
+                                        <option value="Segoe UI">Segoe UI</option>
+                                        <option value="Times New Roman">Times New Roman</option>
+                                        <option value="Georgia">Georgia</option>
+                                        <option value="Palatino Linotype">Palatino Linotype</option>
+                                        <option value="Cambria">Cambria</option>
+                                        <option value="Courier New">Courier New</option>
+                                        <option value="Consolas">Consolas</option>
+                                        <option value="Comic Sans MS">Comic Sans MS</option>
+                                        <option value="Helvetica">Helvetica</option>
+                                        <option value="DejaVu Sans">DejaVu Sans</option>
+                                        <option value="Liberation Sans">Liberation Sans</option>
+                                        
+                                        
+                                        
+                                    </select>
+                                </div>
+                                <div class="col-auto">
+                                    <button type="button" class="btn btn-icon" aria-label="Жирный" id="bold-btn" ><i class="bi bi-type-bold"></i></button>
+                                </div>
+                                <div class="col-auto">
+                                    <button type="button" class="btn btn-icon" aria-label="Курсив" id="italic-btn" ><i class="bi bi-type-italic"></i></button>
+                                </div>
+                                <div class="col-auto">
+                                    <button type="button" class="btn btn-icon" aria-label="Подчеркнутый" id="underline-btn" ><i class="bi bi-type-underline"></i></button>
+                                </div>
+                                <div class="col-auto">
+                                  <button type="button" class="btn btn-icon" aria-label="Выравнивание" id="align-btn">
+                                    <i class="bi bi-text-left"></i>
+                                  </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+                <!-- Холст -->
+                <canvas id="canvas"></canvas>
+            </div>
+       </div>
+        <div class="col-2 d-flex flex-column">
+            <div class="flex-grow-1">
+                <div class="mb-3 text-center">
+                  <label for="nameLabel" class="form-label">Название макета</label>
+                  <input type="text" class="form-control rounded-4" id="nameLabel" placeholder="Введите название макета..." >
+                </div>
+                <div class="row mb-3 g-0 mt-2 d-flex justify-content-center align-items-center">
+                    <div class="card rounded-5">
+                        <div class="card-header rounded-top-5 text-center bg-primary-subtle bg-gradient">
+                            Размеры этикетки (см)
+                        </div>
+                        <div class="card-body">
+                            <div class="form-floating row d-flex justify-content-center align-items-center">
+                                  <div class="col-md-5">
+                                      <label for="canvas-width" class="form-label">Ширина:</label>
+                                      <input type="number" class="form-control" id="canvas-width" value="10" step="0.1" min="0.1">
+                                  </div>
+                                  <div class="col-md-5">
+                                      <label for="canvas-height" class="form-label">Высота:</label>
+                                      <input type="number" class="form-control" id="canvas-height" value="10" step="0.1" min="0.1">
+                                  </div>
+                            </div>
+                            <div class="row mt-2 g-0">
+                                <button id="set-canvas-size" class="btn btn-primary rounded-4">Установить размер</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="row">
+                    <div class="slider-container">
+                        <label for="zoom-range" class="form-label">Масштаб: <span id="zoom-value">100</span>%</label>
+                        <input type="range" class="form-range" id="zoom-range" min="10" max="200" value="100" step="1">
+                    </div>
+                </div>
+            </div>
+            <div class="row mt-2 d-flex justify-content-center align-items-center">
+                <button type="button" class="btn btn-success btn-lg rounded-4 w-75 bg-gradient" id="saveLabel">Сохранить макет</button>
+            </div>
+            <div class="row mt-2 d-flex justify-content-center align-items-center">
+                <button type="button" class="btn btn-primary btn-lg rounded-4 w-75 bg-gradient d-none" id="updateLabel">Сохранить изменения</button>
+            </div>
+            <div class="row mt-2 mb-2 d-flex justify-content-center align-items-center ">
+                <a type="button" class="btn btn-danger btn-lg rounded-4 w-75 bg-gradient" id="saveLabel" href="{% url 'LabelTemplates:label_templates' %}">Выход
+                    <i class="bi bi-box-arrow-right" style=""></i>
+                </a>
+            </div>
+        </div>
+    <div class="modal fade modal-lg" id="editTextModal" tabindex="-1" aria-labelledby="editTextModalLabel" aria-hidden="true">
+      <div class="modal-dialog">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title" id="editTextModalLabel">Редактирование текста</h5>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <textarea id="modalTextbox" class="form-control" rows="5"></textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Закрыть</button>
+            <button type="button" class="btn btn-primary" id="saveText">Сохранить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+</div>
+
+
+
+
+<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+ <script src="https://cdnjs.cloudflare.com/ajax/libs/fabric.js/5.2.4/fabric.min.js"></script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" integrity="sha384-YvpcrYf0tY3lHB60NNkmXc5s9fDVZLESaAA55NDzOxhy9GkcIdslK1eN7N6jIeHz" crossorigin="anonymous"></script>
+{% block extra_js_variables %}{% endblock %}
+<script src="{% static  'LabelTemplates/script.js' %}"></script>
+</body>
+</html>
