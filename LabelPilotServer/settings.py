@@ -51,10 +51,14 @@ INSTALLED_APPS = [
     'Nomenclature.apps.NomenclatureConfig',
     'BarcodeTemplates.apps.BarcodeTemplatesConfig',
     'Packs.apps.PacksConfig',
-
+    'rest_framework',
+    'corsheaders',
+    'drf_spectacular',
+    'api.apps.ApiConfig',
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -89,12 +93,24 @@ WSGI_APPLICATION = 'LabelPilotServer.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+if os.getenv('DATABASE_ENGINE') == 'django.db.backends.postgresql':
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': os.getenv('POSTGRES_DB', 'labelpilot'),
+            'USER': os.getenv('POSTGRES_USER', 'postgres'),
+            'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'postgres'),
+            'HOST': os.getenv('POSTGRES_HOST', 'db'),
+            'PORT': os.getenv('POSTGRES_PORT', '5432'),
+        }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 
 # Password validation
@@ -169,3 +185,22 @@ PUSHER_APP_ID = os.getenv('PUSHER_APP_ID')
 PUSHER_KEY = os.getenv('PUSHER_KEY')
 PUSHER_SECRET = os.getenv('PUSHER_SECRET')
 PUSHER_CLUSTER = os.getenv('PUSHER_CLUSTER')
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',
+    ],
+}
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'LabelPilot API',
+    'DESCRIPTION': 'API for LabelPilot application',
+    'VERSION': '1.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+}
