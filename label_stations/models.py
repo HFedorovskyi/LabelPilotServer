@@ -5,6 +5,7 @@ class LabelsStations(models.Model):
     station_name = models.CharField(max_length=100, default='Станция маркировки')
     station_uuid = models.UUIDField(editable=False, unique=True)
     station_ip = models.GenericIPAddressField(null=True, blank=True)
+    station_port = models.IntegerField(default=5000)
     is_online = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
     changed_at = models.DateTimeField(auto_now=True, null=True)

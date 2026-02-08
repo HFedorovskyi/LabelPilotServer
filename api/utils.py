@@ -201,7 +201,8 @@ class BarcodeGenerator:
 
     def calculate_ean13_checksum(self, ean12_partial):
         if not ean12_partial.isdigit():
-            return ean12_partial.zfill(13)
+            # If it contains placeholders like {{article}}, return a valid dummy for preview
+            return "4600000000008"
         
         if len(ean12_partial) < 12:
             ean12_partial = ean12_partial.zfill(12)

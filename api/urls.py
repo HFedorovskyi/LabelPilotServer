@@ -7,7 +7,8 @@ from api.views import (
     BarcodeTemplatesViewSet, 
     StationsViewSet,
     ProductPackLinkViewSet,
-    GlobalProductAttributeViewSet
+    GlobalProductAttributeViewSet,
+    FullSyncView
 )
 
 
@@ -22,5 +23,6 @@ router.register(r'attributes', GlobalProductAttributeViewSet)
 
 
 urlpatterns = [
+    path('full_sync/', FullSyncView.as_view(), name='full-sync'),
     path('', include(router.urls)),
 ]

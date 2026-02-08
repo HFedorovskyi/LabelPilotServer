@@ -16,20 +16,37 @@ from LabelTemplates.models import LabelTemplates
 from BarcodeTemplates.models import BarcodeTemplate
 from label_stations.models import LabelsStations
 
+import json
+
 class PackSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pack
         fields = '__all__'
 
 class LabelTemplatesSerializer(serializers.ModelSerializer):
+    # 'structure' is for Electron client (which expects a string)
+    structure = serializers.SerializerMethodField()
+    # 'scheme' is for the React web designer (which expects a JSON object)
+    scheme = serializers.JSONField()
+
     class Meta:
         model = LabelTemplates
-        fields = '__all__'
+        fields = ['id', 'name', 'scheme', 'structure', 'created_at', 'updated_at']
+
+    def get_structure(self, obj):
+        # We store it as JSONField in DB, so obj.scheme is already an object.
+        # We dump it to string for the Electron client.
+        return json.dumps(obj.scheme)
 
 class BarcodeTemplateSerializer(serializers.ModelSerializer):
+    structure = serializers.SerializerMethodField()
+
     class Meta:
         model = BarcodeTemplate
-        fields = '__all__'
+        fields = ['id', 'name', 'structure']
+
+    def get_structure(self, obj):
+        return json.dumps(obj.structure)
 
 class LabelsStationsSerializer(serializers.ModelSerializer):
     class Meta:
