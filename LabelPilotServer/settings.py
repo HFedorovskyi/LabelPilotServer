@@ -15,6 +15,7 @@ import os
 
 
 
+
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -45,7 +46,6 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
-    'main_menu.apps.MainMenuConfig',
     'label_stations.apps.LabelStationsConfig',
     'LabelTemplates.apps.LabelTemplatesConfig',
     'Nomenclature.apps.NomenclatureConfig',
@@ -73,8 +73,7 @@ ROOT_URLCONF = 'LabelPilotServer.urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [BASE_DIR / 'templates']
-        ,
+        'DIRS': [],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -93,24 +92,12 @@ WSGI_APPLICATION = 'LabelPilotServer.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 
-if os.getenv('DATABASE_ENGINE') == 'django.db.backends.postgresql':
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.postgresql',
-            'NAME': os.getenv('POSTGRES_DB', 'labelpilot'),
-            'USER': os.getenv('POSTGRES_USER', 'postgres'),
-            'PASSWORD': os.getenv('POSTGRES_PASSWORD', 'postgres'),
-            'HOST': os.getenv('POSTGRES_HOST', 'db'),
-            'PORT': os.getenv('POSTGRES_PORT', '5432'),
-        }
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
+}
 
 
 # Password validation
@@ -181,10 +168,6 @@ CELERY_BEAT_SCHEDULE = {
 }
 
 
-PUSHER_APP_ID = os.getenv('PUSHER_APP_ID')
-PUSHER_KEY = os.getenv('PUSHER_KEY')
-PUSHER_SECRET = os.getenv('PUSHER_SECRET')
-PUSHER_CLUSTER = os.getenv('PUSHER_CLUSTER')
 
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",

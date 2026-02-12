@@ -24,6 +24,7 @@ import io
 import base64
 import json
 import requests
+from common.utils import get_local_ip
 
 class ProductPackLinkViewSet(viewsets.ModelViewSet):
     queryset = ProductPackLink.objects.all().order_by('-created')
@@ -147,7 +148,8 @@ class StationsViewSet(viewsets.ModelViewSet):
             'labels': labels,
             'containers': containers,
             'nomenclature': nomenclature,
-            'packs': [] 
+            'packs': [],
+            'station_number': station.station_number
         }
 
         # Use discovered port, default to 5556 (Client Sync Server Port)
@@ -168,16 +170,38 @@ class StationsViewSet(viewsets.ModelViewSet):
             return Response({'error': f'Failed to connect to station: {str(e)}'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
 
     @action(detail=False, methods=['get'])
+    def server_ip(self, request):
+        """
+        Returns the server's local IP address.
+        """
+        ip = get_local_ip()
+        return Response({'ip': ip})
+
+    @action(detail=False, methods=['get'])
     def full_dump(self, request):
         """
         Endpoint for stations to pull data if they prefer pulling.
         """
+        # full_dump doesn't know which station is requesting —
+        # station_number is included per-station in sync_data instead.
+        # But if we want to support pull-based sync, the station should
+        # identify itself via query param ?station_uuid=...
+        station_number = None
+        station_uuid = request.query_params.get('station_uuid')
+        if station_uuid:
+            try:
+                station = LabelsStations.objects.get(station_uuid=station_uuid)
+                station_number = station.station_number
+            except LabelsStations.DoesNotExist:
+                pass
+
         data = {
             'barcode_templates': BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data,
             'label_templates': LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data,
             'packs': PackSerializer(Pack.objects.all(), many=True).data,
             'global_attributes': GlobalProductAttributeSerializer(GlobalProductAttribute.objects.all(), many=True).data,
             'nomenclatures': NomenclatureSerializer(Nomenclature.objects.all().order_by('order'), many=True).data,
-            'product_pack_links': ProductPackLinkSerializer(ProductPackLink.objects.all(), many=True).data
+            'product_pack_links': ProductPackLinkSerializer(ProductPackLink.objects.all(), many=True).data,
+            'station_number': station_number
         }
         return Response(data)

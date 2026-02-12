@@ -21,12 +21,6 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('', include('main_menu.urls')),
-    path('label_stations/', include('label_stations.urls')),
-    path('label_templates/', include('LabelTemplates.urls')),
-    path('nomenclature/', include('Nomenclature.urls')),
-    path('barcodes/', include('BarcodeTemplates.urls')),
-    path('packs/', include('Packs.urls')),
     path('api/v1/', include('api.urls')),
     path('api/schema/', SpectacularAPIView.as_view(), name='schema'),
     path('api/docs/', SpectacularSwaggerView.as_view(url_name='schema'), name='swagger-ui'),

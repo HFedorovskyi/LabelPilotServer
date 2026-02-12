@@ -1,23 +1,22 @@
-import pusher
-from django.conf import settings
-
-pusher_client = None
-
-if settings.PUSHER_APP_ID:
-    try:
-        pusher_client = pusher.Pusher(
-            app_id=settings.PUSHER_APP_ID,
-            key=settings.PUSHER_KEY,
-            secret=settings.PUSHER_SECRET,
-            cluster=settings.PUSHER_CLUSTER,
-            ssl=True
-        )
-    except Exception as e:
-        print(f"Failed to initialize Pusher: {e}")
+import socket
 
 def send_notification(message):
-    if pusher_client:
-        try:
-            pusher_client.trigger('notifications', 'new-notification', {'message': message})
-        except Exception as e:
-            print(f"Failed to send notification: {e}")
+    """Stub — notifications are not currently implemented."""
+    pass
+
+import os
+
+def get_local_ip():
+    env_ip = os.environ.get('SERVER_EXTERNAL_IP')
+    if env_ip:
+        return env_ip
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+# ...
+        # Doesn't need to be reachable
+        s.connect(('10.255.255.255', 1))
+        IP = s.getsockname()[0]
+        s.close()
+    except Exception:
+        IP = '127.0.0.1'
+    return IP

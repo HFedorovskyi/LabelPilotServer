@@ -68,10 +68,15 @@ class BarcodeGenerator:
                     # Verify/Fix checksum if it's already 13
                     barcode_data = self.calculate_ean13_checksum(barcode_data[:12])
             
-            barcode_image = treepoem.generate_barcode(
-                barcode_type=barcode_type,
-                data=barcode_data,
-                options={
+            is_2d = barcode_type in ('qrcode', 'gs1qrcode', 'datamatrix', 'azteccode')
+            
+            if is_2d:
+                barcode_options = {
+                    'dpi': '203',
+                    'includetext': False,
+                }
+            else:
+                barcode_options = {
                     'dpi': '203',
                     'includetext': True,
                     'textfont': 'Helvetica',
@@ -79,6 +84,11 @@ class BarcodeGenerator:
                     'textyoffset': '-10',
                     'width': '5'
                 }
+            
+            barcode_image = treepoem.generate_barcode(
+                barcode_type=barcode_type,
+                data=barcode_data,
+                options=barcode_options
             )
             
             buffer = io.BytesIO()

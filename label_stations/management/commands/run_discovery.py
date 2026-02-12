@@ -6,6 +6,7 @@ import uuid
 from django.core.management.base import BaseCommand
 from django.conf import settings
 from label_stations.models import LabelsStations
+from common.utils import get_local_ip
 
 DISCOVERY_PORT = 5555
 BROADCAST_IP = '255.255.255.255'
@@ -136,13 +137,4 @@ class Command(BaseCommand):
                 )
                 s.save()
 
-    def get_local_ip(self):
-        try:
-            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            # Doesn't need to be reachable
-            s.connect(('10.255.255.255', 1))
-            IP = s.getsockname()[0]
-            s.close()
-        except:
-            IP = '127.0.0.1'
-        return IP
+

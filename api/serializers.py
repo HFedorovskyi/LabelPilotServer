@@ -36,17 +36,50 @@ class LabelTemplatesSerializer(serializers.ModelSerializer):
     def get_structure(self, obj):
         # We store it as JSONField in DB, so obj.scheme is already an object.
         # We dump it to string for the Electron client.
-        return json.dumps(obj.scheme)
+        
+        # DEEP COPY to match implementation plan and avoid mutation issues if any cache exists
+        import copy
+        scheme = copy.deepcopy(obj.scheme)
+        
+        # Ensure elements exist
+        if isinstance(scheme, dict) and 'elements' in scheme and isinstance(scheme['elements'], list):
+            for el in scheme['elements']:
+                if el.get('type') == 'barcode':
+                    # The Designer saves the "Template Name" (Human Readable) in 'barcodeType'.
+                    # The Client needs the "Technical Type" (bwip-js, e.g. ean13).
+                    
+                    template_id = el.get('templateId')
+                    current_type_name = el.get('barcodeType')
+                    
+                    bt = None
+                    # Try finding by ID first
+                    if template_id:
+                        try:
+                            bt = BarcodeTemplate.objects.get(pk=template_id)
+                        except BarcodeTemplate.DoesNotExist:
+                            pass
+                    
+                    # Fallback to name if no ID or ID not found
+                    if not bt and current_type_name:
+                        try:
+                            bt = BarcodeTemplate.objects.get(name=current_type_name)
+                        except BarcodeTemplate.DoesNotExist:
+                            pass
+                            
+                    # If found, replace the field with technical type
+                    if bt and isinstance(bt.structure, dict):
+                        technical_type = bt.structure.get('barcode_type')
+                        if technical_type:
+                            el['barcodeType'] = technical_type
+
+        return json.dumps(scheme)
 
 class BarcodeTemplateSerializer(serializers.ModelSerializer):
-    structure = serializers.SerializerMethodField()
+    structure = serializers.JSONField()
 
     class Meta:
         model = BarcodeTemplate
         fields = ['id', 'name', 'structure']
-
-    def get_structure(self, obj):
-        return json.dumps(obj.structure)
 
 class LabelsStationsSerializer(serializers.ModelSerializer):
     class Meta:
@@ -59,15 +92,13 @@ class NomenclatureSerializer(serializers.ModelSerializer):
     templates_pack_label_name = serializers.CharField(source='templates_pack_label.name', read_only=True)
     templates_box_label_name = serializers.CharField(source='templates_box_label.name', read_only=True)
 
-    templates_box_label_name = serializers.CharField(source='templates_box_label.name', read_only=True)
-
     class Meta:
         model = Nomenclature
         fields = '__all__'
 
 class ProductPackLinkSerializer(serializers.ModelSerializer):
     class Meta:
-        model = Nomenclature.pack_links.rel.model # Accessing the model class
+        model = ProductPackLink
         fields = '__all__'
 
 class GlobalProductAttributeSerializer(serializers.ModelSerializer):
