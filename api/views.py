@@ -127,38 +127,70 @@ class StationsViewSet(viewsets.ModelViewSet):
     serializer_class = LabelsStationsSerializer
     lookup_field = 'station_uuid'
 
+
+    def _gather_sync_data(self, station, sync_type='UPDATE'):
+        """
+        Helper method to gather all data for a station sync.
+        Returns a unified dictionary structure.
+        """
+        import datetime
+        from common.utils import get_local_ip
+        
+        # Data objects
+        barcodes = BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data
+        labels = LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data
+        containers = PackSerializer(Pack.objects.all(), many=True).data
+        nomenclature = NomenclatureSerializer(Nomenclature.objects.all().order_by('order'), many=True).data
+        global_attributes = GlobalProductAttributeSerializer(GlobalProductAttribute.objects.all(), many=True).data
+        product_pack_links = ProductPackLinkSerializer(ProductPackLink.objects.all(), many=True).data
+
+        # Station identity info
+        # We try to get the server IP dynamically for the identity
+        try:
+            local_ip = get_local_ip()
+            server_url = f"http://{local_ip}:8000"
+        except:
+            server_url = "http://localhost:8000"
+
+        station_info = {
+            "uuid": str(station.station_uuid),
+            "number": station.station_number,
+            "name": station.station_name,
+            "server_url": server_url
+        }
+
+        data = {
+            "station": station_info,
+            "payload": {
+                "barcodes": barcodes,
+                "labels": labels,
+                "containers": containers,
+                "nomenclature": nomenclature,
+                "global_attributes": global_attributes,
+                "product_pack_links": product_pack_links,
+                "packs": [] # Placeholder for transactional data compatibility
+            },
+            "meta": {
+                "type": sync_type,
+                "version": "1.0",
+                "generated_at": datetime.datetime.now().isoformat(),
+            }
+        }
+        return data
+
     @action(detail=True, methods=['post'])
     def sync_data(self, request, station_uuid=None):
         """
-        Pushes full data set to the station.
+        Pushes full data set to the station (Online).
         """
         station = self.get_object()
         
         if not station.station_ip:
             return Response({'error': 'Station has no IP address'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 1. Gather all data
-        barcodes = BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data
-        labels = LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data
-        containers = PackSerializer(Pack.objects.all(), many=True).data
-        nomenclature = NomenclatureSerializer(Nomenclature.objects.all().order_by('order'), many=True).data
-
-        payload = {
-            'barcodes': barcodes,
-            'labels': labels,
-            'containers': containers,
-            'nomenclature': nomenclature,
-            'packs': [],
-            'station_number': station.station_number
-        }
+        payload = self._gather_sync_data(station, sync_type='ONLINE_SYNC')
 
         # Use discovered port, default to 5556 (Client Sync Server Port)
-        # Note: Discovery service finds station and records port. 
-        # If client broadcasts port 5556, station.station_port should be 5556.
-        # But `run_discovery.py` default was 5000.
-        # I updated `discovery.ts` to broadcast 5556.
-        # So newly discovered stations will have 5556.
-        # Old stations might have 5000.
         target_port = station.station_port or 5556
         url = f'http://{station.station_ip}:{target_port}/api/full_sync'
 
@@ -167,7 +199,146 @@ class StationsViewSet(viewsets.ModelViewSet):
             resp.raise_for_status()
             return Response({'status': 'success', 'message': f'Data synced to {station.station_name}'})
         except requests.RequestException as e:
-            return Response({'error': f'Failed to connect to station: {str(e)}'}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+            error_msg = f'Failed to connect to station: {str(e)}'
+            if hasattr(e, 'response') and e.response is not None:
+                try:
+                    error_detail = e.response.json().get('error') or e.response.text
+                    error_msg += f' - Details: {error_detail}'
+                except Exception:
+                    if e.response.text:
+                        error_msg += f' - Details: {e.response.text[:200]}'
+            return Response({'error': error_msg}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(detail=True, methods=['get'])
+    def download_update(self, request, station_uuid=None):
+        """
+        Generates an encrypted .lps file for offline update.
+        """
+        from common.crypto_utils import encrypt_data
+        from django.http import HttpResponse
+        import datetime
+
+        station = self.get_object()
+        data = self._gather_sync_data(station, sync_type='OFFLINE_UPDATE')
+
+        encrypted_data = encrypt_data(data)
+        
+        filename = f"update_{station.station_number or 'XX'}_{datetime.datetime.now().strftime('%Y%m%d')}.lps"
+        response = HttpResponse(encrypted_data, content_type='application/octet-stream')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    @action(detail=True, methods=['get'])
+    def download_identity(self, request, station_uuid=None):
+        """
+        Generates an encrypted .lpi file for offline station setup.
+        Now uses the unified structure and includes full data.
+        """
+        from common.crypto_utils import encrypt_data
+        from django.http import HttpResponse
+
+        station = self.get_object()
+        if station.station_number is None:
+             return Response({'error': 'Station has no number assigned'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = self._gather_sync_data(station, sync_type='OFFLINE_IDENTITY')
+        encrypted_identity = encrypt_data(data)
+        
+        filename = f"identity_{station.station_number:02d}.lpi"
+        response = HttpResponse(encrypted_identity, content_type='application/octet-stream')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+        return response
+
+    @action(detail=False, methods=['post'])
+    def upload_report(self, request):
+        """
+        Accepts an encrypted .lpr file from a station.
+        """
+        from common.crypto_utils import decrypt_data
+        
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            encrypted_data = file_obj.read()
+            data = decrypt_data(encrypted_data)
+        except Exception as e:
+             return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+             
+        # Process report data
+        # For now, just log it and return success
+        # In future: Save to TransactionLog model
+        
+        station_uuid = data.get('station_uuid')
+        # report_type = data.get('type')
+        
+        from ProductionLogs.models import PrintedLabel, StationLog
+        from django.utils.dateparse import parse_datetime
+        
+        station = LabelsStations.objects.filter(station_uuid=station_uuid).first()
+        
+        # 1. Process Printed Labels
+        labels_data = data.get('printed_labels', [])
+        labels_count = 0
+        for item in labels_data:
+            unique_id = item.get('unique_id')
+            # Skip if already exists (idempotency)
+            if not unique_id or PrintedLabel.objects.filter(unique_id=unique_id).exists():
+                continue
+            
+            # Resolve FKs if possible
+            prod_id = item.get('product_id')
+            pack_id = item.get('pack_id')
+            
+            prod = Nomenclature.objects.filter(pk=prod_id).first() if prod_id else None
+            pack = Pack.objects.filter(pk=pack_id).first() if pack_id else None
+            
+            try:
+                PrintedLabel.objects.create(
+                    station=station,
+                    station_user_name=item.get('user_name', ''),
+                    product=prod,
+                    product_name_snapshot=item.get('product_name', '') or (prod.name if prod else ''),
+                    pack=pack,
+                    pack_name_snapshot=item.get('pack_name', '') or (pack.name if pack else ''),
+                    unique_id=unique_id,
+                    printed_at=parse_datetime(item.get('printed_at'))
+                )
+                labels_count += 1
+            except Exception as e:
+                print(f"Error saving label {unique_id}: {e}")
+
+        # 2. Process Logs
+        logs_data = data.get('logs', [])
+        logs_count = 0
+        for item in logs_data:
+            try:
+                StationLog.objects.create(
+                    station=station,
+                    level=item.get('level', 'INFO'),
+                    message=item.get('message', ''),
+                    timestamp=parse_datetime(item.get('timestamp'))
+                )
+                logs_count += 1
+            except Exception as e:
+                print(f"Error saving log: {e}")
+        
+        # 3. Update Station Status if provided
+        if station and 'status' in data:
+             # Example: could update last_seen, is_online (though report implies async)
+             pass 
+        
+        print(f"Report processed for {station_uuid}: {labels_count} labels, {logs_count} logs.")
+        
+        return Response({
+            'status': 'success', 
+            'message': 'Report processed successfully',
+            'details': {
+                'labels_processed': labels_count,
+                'logs_processed': logs_count
+            }
+        })
 
     @action(detail=False, methods=['get'])
     def server_ip(self, request):
@@ -177,31 +348,55 @@ class StationsViewSet(viewsets.ModelViewSet):
         ip = get_local_ip()
         return Response({'ip': ip})
 
+    @action(detail=False, methods=['get'], permission_classes=[AllowAny])
+    def ping(self, request):
+        """
+        Heartbeat/Handshake endpoint for stations.
+        If ?station_uuid=... is provided, marks that station as online.
+        """
+        from django.utils import timezone
+        station_uuid = request.query_params.get('station_uuid')
+        message = "Pong"
+        
+        if station_uuid:
+            try:
+                station = LabelsStations.objects.get(station_uuid=station_uuid)
+                station.is_online = True
+                station.save(update_fields=['is_online', 'changed_at'])
+                message = f"Pong, station {station.station_name} updated"
+            except (LabelsStations.DoesNotExist, ValueError, TypeError):
+                pass
+                
+        return Response({
+            'status': 'online',
+            'server_time': timezone.now(),
+            'message': message
+        })
+
     @action(detail=False, methods=['get'])
     def full_dump(self, request):
         """
         Endpoint for stations to pull data if they prefer pulling.
+        Now reuses gather_sync_data logic if possible, or keeps separate.
+        Let's unify slightly but keep structure compatible.
         """
-        # full_dump doesn't know which station is requesting —
-        # station_number is included per-station in sync_data instead.
-        # But if we want to support pull-based sync, the station should
-        # identify itself via query param ?station_uuid=...
         station_number = None
         station_uuid = request.query_params.get('station_uuid')
         if station_uuid:
             try:
                 station = LabelsStations.objects.get(station_uuid=station_uuid)
-                station_number = station.station_number
+                return Response(self._gather_sync_data(station))
             except LabelsStations.DoesNotExist:
                 pass
-
+        
+        # Fallback if no station identified
         data = {
-            'barcode_templates': BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data,
-            'label_templates': LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data,
-            'packs': PackSerializer(Pack.objects.all(), many=True).data,
+            'barcodes': BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data,
+            'labels': LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data,
+            'containers': PackSerializer(Pack.objects.all(), many=True).data,
+            'nomenclature': NomenclatureSerializer(Nomenclature.objects.all().order_by('order'), many=True).data,
             'global_attributes': GlobalProductAttributeSerializer(GlobalProductAttribute.objects.all(), many=True).data,
-            'nomenclatures': NomenclatureSerializer(Nomenclature.objects.all().order_by('order'), many=True).data,
             'product_pack_links': ProductPackLinkSerializer(ProductPackLink.objects.all(), many=True).data,
-            'station_number': station_number
+            'station_number': None
         }
         return Response(data)

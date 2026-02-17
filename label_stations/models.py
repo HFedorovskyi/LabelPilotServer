@@ -1,3 +1,4 @@
+import uuid
 from django.db import models
 
 
@@ -7,7 +8,7 @@ class LabelsStations(models.Model):
         unique=True, null=True, blank=True,
         help_text='Уникальный двухзначный номер станции (01-99)'
     )
-    station_uuid = models.UUIDField(editable=False, unique=True)
+    station_uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     station_ip = models.GenericIPAddressField(null=True, blank=True)
     station_port = models.IntegerField(default=5000)
     is_online = models.BooleanField(default=False)

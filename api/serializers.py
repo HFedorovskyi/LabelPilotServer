@@ -82,9 +82,16 @@ class BarcodeTemplateSerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'structure']
 
 class LabelsStationsSerializer(serializers.ModelSerializer):
+    station_number = serializers.SerializerMethodField()
+
     class Meta:
         model = LabelsStations
         fields = '__all__'
+
+    def get_station_number(self, obj):
+        if obj.station_number is not None:
+            return f"{obj.station_number:02d}"
+        return None
 
 class NomenclatureSerializer(serializers.ModelSerializer):
     portion_container_name = serializers.CharField(source='portion_container.name', read_only=True)
