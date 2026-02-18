@@ -133,11 +133,24 @@ class VersionView(APIView):
 
     def get(self, request):
         from django.conf import settings
+        from pathlib import Path
+
+        # Read version dynamically so it reflects updates without container restart
+        def _live_version() -> str:
+            for candidate in [Path("/version/VERSION"), Path(settings.BASE_DIR).parent / "VERSION"]:
+                try:
+                    if candidate.exists():
+                        return candidate.read_text().strip()
+                except Exception:
+                    pass
+            return settings.VERSION  # fallback to startup-cached value
+
         return Response({
-            'server_version': settings.VERSION,
+            'server_version': _live_version(),
             'min_client_version': settings.MIN_CLIENT_VERSION,
             'latest_client_version': settings.LATEST_CLIENT_VERSION,
         })
+
 
 class StationsViewSet(viewsets.ModelViewSet):
     queryset = LabelsStations.objects.all()

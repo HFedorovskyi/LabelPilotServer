@@ -151,12 +151,22 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # ─── Versioning ───────────────────────────────────────────────────────────────
-# Bump VERSION on every server release.
-# Bump MIN_CLIENT_VERSION only when a breaking API change requires a newer client.
-# Bump LATEST_CLIENT_VERSION when a new client build is published.
-VERSION = os.getenv('SERVER_VERSION', '1.0.0')
+# Read version from the VERSION file mounted into the container at /version/VERSION.
+# Falls back to SERVER_VERSION env var, then to '1.0.0'.
+def _read_version_file() -> str:
+    for candidate in [Path("/version/VERSION"), Path(BASE_DIR).parent / "VERSION"]:
+        try:
+            if candidate.exists():
+                return candidate.read_text().strip()
+        except Exception:
+            pass
+    return os.getenv('SERVER_VERSION', '1.0.0')
+
+VERSION = _read_version_file()
 MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.0.0')
 LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.0.0')
+
+
 
 
 
