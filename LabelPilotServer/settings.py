@@ -150,6 +150,14 @@ STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
+# ─── Versioning ───────────────────────────────────────────────────────────────
+# Bump VERSION on every server release.
+# Bump MIN_CLIENT_VERSION only when a breaking API change requires a newer client.
+# Bump LATEST_CLIENT_VERSION when a new client build is published.
+VERSION = os.getenv('SERVER_VERSION', '1.0.0')
+MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.0.0')
+LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.0.0')
+
 
 
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://:1234@redis:6379/0')
@@ -185,6 +193,6 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     'TITLE': 'LabelPilot API',
     'DESCRIPTION': 'API for LabelPilot application',
-    'VERSION': '1.0.0',
+    'VERSION': '1.0.1',
     'SERVE_INCLUDE_SCHEMA': False,
 }

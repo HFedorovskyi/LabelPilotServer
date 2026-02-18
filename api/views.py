@@ -122,6 +122,23 @@ class FullSyncView(APIView):
         }
         return Response(payload)
 
+
+class VersionView(APIView):
+    """
+    Public endpoint returning server and client version info.
+    Used by the admin panel and the Updater Service.
+    GET /api/v1/version/
+    """
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.conf import settings
+        return Response({
+            'server_version': settings.VERSION,
+            'min_client_version': settings.MIN_CLIENT_VERSION,
+            'latest_client_version': settings.LATEST_CLIENT_VERSION,
+        })
+
 class StationsViewSet(viewsets.ModelViewSet):
     queryset = LabelsStations.objects.all()
     serializer_class = LabelsStationsSerializer
@@ -172,7 +189,9 @@ class StationsViewSet(viewsets.ModelViewSet):
             },
             "meta": {
                 "type": sync_type,
-                "version": "1.0",
+                "format_version": "1.0",
+                "server_version": settings.VERSION,
+                "min_client_version": settings.MIN_CLIENT_VERSION,
                 "generated_at": datetime.datetime.now().isoformat(),
             }
         }
@@ -355,6 +374,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         If ?station_uuid=... is provided, marks that station as online.
         """
         from django.utils import timezone
+        from django.conf import settings
         station_uuid = request.query_params.get('station_uuid')
         message = "Pong"
         
@@ -370,7 +390,10 @@ class StationsViewSet(viewsets.ModelViewSet):
         return Response({
             'status': 'online',
             'server_time': timezone.now(),
-            'message': message
+            'message': message,
+            'server_version': settings.VERSION,
+            'min_client_version': settings.MIN_CLIENT_VERSION,
+            'latest_client_version': settings.LATEST_CLIENT_VERSION,
         })
 
     @action(detail=False, methods=['get'])
