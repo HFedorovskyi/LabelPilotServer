@@ -160,7 +160,7 @@ def _read_version_file() -> str:
                 return candidate.read_text().strip()
         except Exception:
             pass
-    return os.getenv('SERVER_VERSION', 'v1.0.0')
+    return os.getenv('SERVER_VERSION', '1.0.0')
 
 VERSION = _read_version_file()
 MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.1.11')
