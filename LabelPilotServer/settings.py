@@ -163,8 +163,8 @@ def _read_version_file() -> str:
     return os.getenv('SERVER_VERSION', '1.0.0')
 
 VERSION = _read_version_file()
-MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.0.0')
-LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.0.0')
+MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.1.11')
+LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.1.11')
 
 
 
@@ -203,6 +203,6 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     'TITLE': 'LabelPilot API',
     'DESCRIPTION': 'API for LabelPilot application',
-    'VERSION': '1.0.1',
+    'VERSION': '1.0.3',
     'SERVE_INCLUDE_SCHEMA': False,
 }

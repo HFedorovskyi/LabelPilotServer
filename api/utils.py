@@ -29,11 +29,12 @@ class BarcodeGenerator:
             'pack_count': '99',
             'box_count': '99',
             'batch_number': '',
+            'extra_data': '999999999999',
         }
 
         self.AI_presence = False
 
-    def generate_image_base64(self, structure_data):
+    def generate_image_base64(self, structure_data, product=None):
         # Handle stringified JSON
         if isinstance(structure_data, str):
             try:
@@ -58,7 +59,7 @@ class BarcodeGenerator:
             self.AI_presence = True
         
         try:
-            barcode_data = self.decode_structure_barcode(fields_barcode)
+            barcode_data = self.decode_structure_barcode(fields_barcode, product=product)
             
             # If it's EAN-13 and we have 12 or 13 digits, ensure checksum is correct
             if barcode_type == 'ean13':
@@ -98,7 +99,7 @@ class BarcodeGenerator:
         except Exception as e:
             raise e
 
-    def decode_structure_barcode(self, structure):
+    def decode_structure_barcode(self, structure, product=None):
         if isinstance(structure, str):
             try:
                 import json
@@ -117,6 +118,27 @@ class BarcodeGenerator:
                 continue
                 
             f_type = item.get('field_type')
+            
+            # Special case for reading from test_product
+            if f_type == 'extra_data':
+                field_name = item.get('value', '')
+                field_length = item.get('length', '12')
+                target_len = int(field_length) if str(field_length).isdigit() else 12
+                
+                if product and isinstance(product.extra_data, dict) and field_name in product.extra_data:
+                    raw_val = str(product.extra_data[field_name])
+                    if len(raw_val) > target_len:
+                        string_for_generation += raw_val[:target_len]
+                    else:
+                        string_for_generation += raw_val.zfill(target_len)
+                else:
+                    # Fallback to dummy
+                    string_for_generation += self.format_another_types(f_type, field_length)
+                
+                if self.AI_presence:
+                    self.AI_presence = False
+                continue
+
             if f_type == 'constanta':
                 string_for_generation += item.get('value', '')
             elif f_type == 'ai':
@@ -134,6 +156,7 @@ class BarcodeGenerator:
                     item.get('length', '6')
                 )
             elif f_type in self.another_types:
+                # Use length from the item, defaulting to 12 if not provided (extra_data might need this default)
                 string_for_generation += self.format_another_types(
                     f_type, 
                     item.get('length', '12')
@@ -178,7 +201,7 @@ class BarcodeGenerator:
         return formatted_date.zfill(int(length))
 
     def format_another_types(self, field_type, length):
-        if field_type == 'article' or field_type == 'batch_number':
+        if field_type == 'article' or field_type == 'batch_number' or field_type == 'extra_data':
             if self.AI_presence:
                 data_for_barcode = (int(length) - 1) * '9'
                 return self.calculate_gtin14_checksum(data_for_barcode)

@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from django.conf import settings
 from api.serializers import (
     NomenclatureSerializer, 
     PackSerializer, 
@@ -88,14 +89,25 @@ class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def generate(self, request):
         from api.utils import BarcodeGenerator
+        from Nomenclature.models import Nomenclature
+        
         structure = request.data.get('barcode_structure')
+        product_id = request.data.get('product_id')
+        
         if not structure:
             # Fallback for checking how it was sent in original
             structure = request.data
             
+        test_product = None
+        if product_id:
+            try:
+                test_product = Nomenclature.objects.get(pk=product_id)
+            except Nomenclature.DoesNotExist:
+                pass
+            
         try:
             generator = BarcodeGenerator()
-            image_base64 = generator.generate_image_base64(structure)
+            image_base64 = generator.generate_image_base64(structure, product=test_product)
             return Response({'success': True, 'png': image_base64})
         except Exception as e:
             import traceback
