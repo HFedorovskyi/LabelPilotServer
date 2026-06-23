@@ -11,6 +11,12 @@ class Nomenclature(models.Model):
     exp_date = models.IntegerField(verbose_name="Срок годности (суток)")
     close_box_counter = models.IntegerField(verbose_name="Количество вложений в коробе")
     
+    # Фикс вес
+    is_fixed_weight = models.BooleanField(default=False, verbose_name="Фикс вес")
+    fixed_weight_grams = models.FloatField(default=0, verbose_name="Значение фикс. веса (г)")
+    min_weight_grams = models.FloatField(default=0, verbose_name="Мин. допустимый вес (г)")
+    max_weight_grams = models.FloatField(default=0, verbose_name="Макс. допустимый вес (г)")
+    
     # Связи
     portion_container = models.ForeignKey(
         Pack, 
@@ -44,7 +50,15 @@ class Nomenclature(models.Model):
         related_name='nomenclatures_box_label',
         verbose_name="Шаблон этикетки короб"
     )
-    
+    templates_pallet_label = models.ForeignKey(
+        LabelTemplates,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='nomenclatures_pallet_label',
+        verbose_name="Шаблон паллетного листа"
+    )
+
     # Динамические поля
     extra_data = models.JSONField(default=dict, blank=True, verbose_name="Дополнительные реквизиты")
     

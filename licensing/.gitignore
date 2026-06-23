@@ -1,0 +1,4 @@
+# NEVER commit signing keys or issued license files.
+*.key
+*.lpl
+vendor_private*

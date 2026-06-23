@@ -1,4 +1,5 @@
 from rest_framework import viewsets, status
+from server_activity.helpers import log_event
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -10,12 +11,16 @@ from api.serializers import (
     BarcodeTemplateSerializer, 
     LabelsStationsSerializer,
     ProductPackLinkSerializer,
-    GlobalProductAttributeSerializer
+    GlobalProductAttributeSerializer,
+    PrintJobSerializer,
+    PalletSerializer,
 )
 
 from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute
+from print_jobs.models import PrintJob
 
 from Packs.models import Pack
+from Pallets.models import Pallet
 from LabelTemplates.models import LabelTemplates
 from BarcodeTemplates.models import BarcodeTemplate
 from label_stations.models import LabelsStations
@@ -74,9 +79,156 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
                 
         return Response({'results': results})
 
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    def preview_import(self, request):
+        file_obj = request.FILES.get('file')
+        sep_param = request.data.get('separator')
+        if not file_obj:
+            return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            import pandas as pd
+            filename = file_obj.name.lower()
+            if filename.endswith('.csv'):
+                try:
+                    file_content = file_obj.read().decode('utf-8')
+                except UnicodeDecodeError:
+                    file_obj.seek(0)
+                    file_content = file_obj.read().decode('cp1251')
+                import io
+                
+                sep_val = None if sep_param == 'auto' or not sep_param else sep_param
+                df = pd.read_csv(io.StringIO(file_content), nrows=10, sep=sep_val, on_bad_lines='skip', engine='python')
+            elif filename.endswith(('.xls', '.xlsx')):
+                df = pd.read_excel(file_obj, nrows=10)
+            else:
+                return Response({'error': 'Unsupported file format'}, status=status.HTTP_400_BAD_REQUEST)
+            
+            columns = df.columns.tolist()
+            # Replace all NaN/None with empty string for JSON safety
+            df = df.fillna('')
+            preview_data = df.to_dict(orient='records')
+            
+            return Response({'columns': columns, 'preview': preview_data})
+        except Exception as e:
+             return Response({'error': f'Parsing failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    def execute_import(self, request):
+        file_obj = request.FILES.get('file')
+        mapping_str = request.data.get('mapping')
+        sep_param = request.data.get('separator')
+        
+        if not file_obj or not mapping_str:
+            return Response({'error': 'File or mapping not provided'}, status=status.HTTP_400_BAD_REQUEST)
+            
+        try:
+            import json
+            mapping = json.loads(mapping_str)
+        except json.JSONDecodeError:
+            return Response({'error': 'Invalid mapping format json'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            import pandas as pd
+            filename = file_obj.name.lower()
+            if filename.endswith('.csv'):
+                try:
+                    file_content = file_obj.read().decode('utf-8')
+                except UnicodeDecodeError:
+                    file_obj.seek(0)
+                    file_content = file_obj.read().decode('cp1251')
+                import io
+                sep_val = None if sep_param == 'auto' or not sep_param else sep_param
+                df = pd.read_csv(io.StringIO(file_content), sep=sep_val, on_bad_lines='skip', engine='python')
+            else:
+                df = pd.read_excel(file_obj)
+                
+            # Replace NaN with None for clean data handling
+            df = df.fillna('')
+            
+            success_count = 0
+            error_count = 0
+            errors = []
+            
+            for index, row in df.iterrows():
+                try:
+                    article_col = mapping.get('article')
+                    name_col = mapping.get('name')
+                    
+                    article = str(row.get(article_col, '')).strip() if article_col else ''
+                    name = str(row.get(name_col, '')).strip() if name_col else ''
+                    
+                    if not article or not name:
+                        error_count += 1
+                        errors.append(f"Row {index+2}: Missing required article or name")
+                        continue
+                        
+                    exp_date_col = mapping.get('exp_date')
+                    exp_date_raw = str(row.get(exp_date_col, '')).strip() if exp_date_col else ''
+                    try:
+                        exp_date = int(float(exp_date_raw)) if exp_date_raw else 0
+                    except (ValueError, TypeError):
+                        exp_date = 0
+                        
+                    close_box_col = mapping.get('close_box_counter')
+                    close_box_raw = str(row.get(close_box_col, '')).strip() if close_box_col else ''
+                    try:
+                        close_box_counter = int(float(close_box_raw)) if close_box_raw else 0
+                    except (ValueError, TypeError):
+                        close_box_counter = 0
+
+                    extra_data = {}
+                    if mapping.get('extra_data_map'):
+                        for attr_name, col_name in mapping.get('extra_data_map').items():
+                            if col_name:
+                                val = row.get(col_name)
+                                if val is not None and str(val).strip() != '' and str(val) != 'None':
+                                    extra_data[attr_name] = val
+
+                    defaults_dict = {
+                        'name': name,
+                        'exp_date': exp_date,
+                        'close_box_counter': close_box_counter,
+                        'extra_data': extra_data
+                    }
+
+                    static_values = mapping.get('staticValues', {})
+                    if static_values.get('portionContainerId'):
+                        defaults_dict['portion_container_id'] = static_values.get('portionContainerId')
+                    if static_values.get('boxContainerId'):
+                        defaults_dict['box_container_id'] = static_values.get('boxContainerId')
+                    if static_values.get('packLabelId'):
+                        defaults_dict['templates_pack_label_id'] = static_values.get('packLabelId')
+                    if static_values.get('boxLabelId'):
+                        defaults_dict['templates_box_label_id'] = static_values.get('boxLabelId')
+
+                    nom, created = Nomenclature.objects.update_or_create(
+                        article=article,
+                        defaults=defaults_dict
+                    )
+                    success_count += 1
+                except Exception as e:
+                    error_count += 1
+                    errors.append(f"Row {index+2}: {str(e)}")
+                    
+            return Response({
+                'success': True, 
+                'imported': success_count,
+                'errors': errors[:10],
+                'error_count': error_count
+            })
+            
+        except Exception as e:
+             return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
 class PacksViewSet(viewsets.ModelViewSet):
     queryset = Pack.objects.all().order_by('-created')
     serializer_class = PackSerializer
+
+
+class PalletViewSet(viewsets.ModelViewSet):
+    queryset = Pallet.objects.all().prefetch_related('items', 'items__nomenclature').order_by('-created')
+    serializer_class = PalletSerializer
 
 class LabelTemplatesViewSet(viewsets.ModelViewSet):
     queryset = LabelTemplates.objects.all()
@@ -88,27 +240,39 @@ class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def generate(self, request):
-        from api.utils import BarcodeGenerator
+        from api.utils import BarcodeGenerator, validate_structure
+
         from Nomenclature.models import Nomenclature
-        
+
         structure = request.data.get('barcode_structure')
         product_id = request.data.get('product_id')
-        
+
         if not structure:
-            # Fallback for checking how it was sent in original
-            structure = request.data
-            
+            return Response({'errors': ['Не передана структура штрихкода.']}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate the structure before rendering. Returns 400 {errors: [...]}.
+        validation_errors = validate_structure(structure)
+        if validation_errors:
+            return Response({'errors': validation_errors}, status=status.HTTP_400_BAD_REQUEST)
+
         test_product = None
         if product_id:
             try:
                 test_product = Nomenclature.objects.get(pk=product_id)
             except Nomenclature.DoesNotExist:
                 pass
-            
+
         try:
             generator = BarcodeGenerator()
-            image_base64 = generator.generate_image_base64(structure, product=test_product)
-            return Response({'success': True, 'png': image_base64})
+            image_base64, data_string, warnings = generator.generate_image_base64(
+                structure, product=test_product
+            )
+            return Response({
+                'success': True,
+                'png': image_base64,
+                'data_string': data_string,
+                'warnings': warnings,
+            })
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -164,10 +328,39 @@ class VersionView(APIView):
         })
 
 
+class LicenseView(APIView):
+    """Public license status for the admin UI: edition, customer, expiry, seat usage,
+    and this server's machine_id (so the vendor can issue a machine-bound license).
+    GET /api/v1/license/"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.conf import settings
+        from licensing import license_status, license_state
+        data = dict(license_status())
+        st = license_state()
+        # Surfaced separately so the admin UI can tell "bound to a different machine"
+        # apart from "no license" (license_status() reports a wrong-machine license as
+        # unlicensed). `strict` reflects the effective fail-closed posture.
+        data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) and not getattr(settings, 'DEBUG', False)
+        data['signature_valid'] = st.signature_valid
+        data['machine_ok'] = st.machine_ok
+        data['stations_used'] = LabelsStations.objects.count()
+        return Response(data)
+
+
 class StationsViewSet(viewsets.ModelViewSet):
     queryset = LabelsStations.objects.all()
     serializer_class = LabelsStationsSerializer
     lookup_field = 'station_uuid'
+
+    def perform_create(self, serializer):
+        # Enforce the license seat limit on API station creation (no license = unlimited).
+        from licensing import seat_available
+        from rest_framework.exceptions import ValidationError
+        if not seat_available(LabelsStations.objects.count()):
+            raise ValidationError({"license": "Достигнут лимит станций по лицензии."})
+        serializer.save()
 
 
     def _gather_sync_data(self, station, sync_type='UPDATE'):
@@ -241,6 +434,10 @@ class StationsViewSet(viewsets.ModelViewSet):
         try:
             resp = requests.post(url, json=payload, timeout=5)
             resp.raise_for_status()
+            from django.utils import timezone as tz
+            station.last_sync_at = tz.now()
+            station.save(update_fields=['last_sync_at', 'changed_at'])
+            log_event('station_synced', f'Данные синхронизированы со станцией «{station.station_name}» (онлайн)')
             return Response({'status': 'success', 'message': f'Data synced to {station.station_name}'})
         except requests.RequestException as e:
             error_msg = f'Failed to connect to station: {str(e)}'
@@ -374,6 +571,12 @@ class StationsViewSet(viewsets.ModelViewSet):
              pass 
         
         print(f"Report processed for {station_uuid}: {labels_count} labels, {logs_count} logs.")
+        if station:
+            from django.utils import timezone as tz
+            station.last_sync_at = tz.now()
+            station.save(update_fields=['last_sync_at', 'changed_at'])
+        station_label = station.station_name if station else station_uuid
+        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}» (USB): {labels_count} этикеток, {logs_count} логов')
         
         return Response({
             'status': 'success', 
@@ -448,3 +651,160 @@ class StationsViewSet(viewsets.ModelViewSet):
             'station_number': None
         }
         return Response(data)
+
+
+class PrintJobViewSet(viewsets.ModelViewSet):
+    queryset = PrintJob.objects.all().select_related('station', 'nomenclature')
+    serializer_class = PrintJobSerializer
+
+    def perform_create(self, serializer):
+        job = serializer.save()
+        station_name = job.station.station_name if job.station else '—'
+        product_name = job.nomenclature.name if job.nomenclature else '—'
+        log_event('job_created', f'Создано задание #{job.pk} «{product_name}» для станции «{station_name}»')
+
+    @action(detail=True, methods=['post'])
+    def send_to_station(self, request, pk=None):
+        """
+        Sends a print job to the assigned station via HTTP.
+        """
+        job = self.get_object()
+        station = job.station
+
+        if not station.station_ip:
+            job.status = 'error'
+            job.save(update_fields=['status', 'updated_at'])
+            return Response({'error': 'У станции не указан IP адрес'}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = {
+            'type': 'PRINT_JOB',
+            'job_id': job.pk,
+            'nomenclature_id': job.nomenclature_id,
+            'nomenclature_name': job.nomenclature.name,
+            'nomenclature_article': job.nomenclature.article,
+            'quantity': job.quantity,
+            'quantity_unit': job.quantity_unit,
+            'batch_number': job.batch_number,
+            'marking_date': job.marking_date.isoformat() if job.marking_date else None,
+        }
+
+        target_port = station.station_port or 5556
+        url = f'http://{station.station_ip}:{target_port}/api/print_job'
+
+        try:
+            resp = requests.post(url, json=payload, timeout=5)
+            resp.raise_for_status()
+            job.status = 'sent'
+            job.save(update_fields=['status', 'updated_at'])
+            log_event('job_sent', f'Задание #{job.pk} «{job.nomenclature.name}» отправлено на станцию «{station.station_name}»')
+            return Response({'status': 'success', 'message': f'Задание отправлено на станцию "{station.station_name}"'})
+        except requests.RequestException as e:
+            job.status = 'error'
+            job.save(update_fields=['status', 'updated_at'])
+            return Response({'error': f'Ошибка отправки: {str(e)}'}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(detail=True, methods=['get'])
+    def download_for_usb(self, request, pk=None):
+        """
+        Downloads a single print job as an encrypted .lpj file for USB transfer.
+        """
+        from common.crypto_utils import encrypt_data
+        from django.http import HttpResponse
+        import datetime
+
+        job = self.get_object()
+        data = {
+            'type': 'PRINT_JOB',
+            'jobs': [{
+                'job_id': job.pk,
+                'nomenclature_id': job.nomenclature_id,
+                'nomenclature_name': job.nomenclature.name,
+                'nomenclature_article': job.nomenclature.article,
+                'quantity': job.quantity,
+                'quantity_unit': job.quantity_unit,
+                'batch_number': job.batch_number,
+                'marking_date': job.marking_date.isoformat() if job.marking_date else None,
+            }],
+            'station': {
+                'uuid': str(job.station.station_uuid),
+                'number': job.station.station_number,
+                'name': job.station.station_name,
+            },
+            'meta': {
+                'generated_at': datetime.datetime.now().isoformat(),
+                'server_version': settings.VERSION,
+            }
+        }
+
+        encrypted = encrypt_data(data)
+        filename = f"job_{job.pk}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.lpj"
+        response = HttpResponse(encrypted, content_type='application/octet-stream')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        job.status = 'sent'
+        job.save(update_fields=['status', 'updated_at'])
+        return response
+
+    @action(detail=False, methods=['get'])
+    def download_usb_bundle(self, request):
+        """
+        Downloads ALL pending print jobs as a single encrypted .lpj file,
+        grouped by station. Ideal for USB transfer of multiple jobs at once.
+        Optionally filter by station with ?station_id=<id>.
+        """
+        from common.crypto_utils import encrypt_data
+        from django.http import HttpResponse
+        import datetime
+
+        station_id = request.query_params.get('station_id')
+        qs = PrintJob.objects.filter(status='pending').select_related('station', 'nomenclature')
+        if station_id:
+            qs = qs.filter(station_id=station_id)
+
+        if not qs.exists():
+            return Response({'error': 'Нет ожидающих заданий'}, status=status.HTTP_404_NOT_FOUND)
+
+        stations_data = {}
+        job_ids = []
+        for job in qs:
+            key = str(job.station.station_uuid)
+            if key not in stations_data:
+                stations_data[key] = {
+                    'station': {
+                        'uuid': str(job.station.station_uuid),
+                        'number': job.station.station_number,
+                        'name': job.station.station_name,
+                    },
+                    'jobs': []
+                }
+            stations_data[key]['jobs'].append({
+                'job_id': job.pk,
+                'nomenclature_id': job.nomenclature_id,
+                'nomenclature_name': job.nomenclature.name,
+                'nomenclature_article': job.nomenclature.article,
+                'quantity': job.quantity,
+                'quantity_unit': job.quantity_unit,
+                'batch_number': job.batch_number,
+                'marking_date': job.marking_date.isoformat() if job.marking_date else None,
+            })
+            job_ids.append(job.pk)
+
+        data = {
+            'type': 'PRINT_JOB_BUNDLE',
+            'stations': list(stations_data.values()),
+            'meta': {
+                'total_jobs': len(job_ids),
+                'generated_at': datetime.datetime.now().isoformat(),
+                'server_version': settings.VERSION,
+            }
+        }
+
+        encrypted = encrypt_data(data)
+        filename = f"print_jobs_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.lpj"
+        response = HttpResponse(encrypted, content_type='application/octet-stream')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        # Mark all bundled jobs as sent
+        qs.filter(pk__in=job_ids).update(status='sent')
+        return response
+

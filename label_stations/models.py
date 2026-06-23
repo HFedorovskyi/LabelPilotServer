@@ -3,6 +3,12 @@ from django.db import models
 
 
 class LabelsStations(models.Model):
+    MODE_CHOICES = (
+        ('online', 'Онлайн'),
+        ('offline', 'Оффлайн'),
+        ('hybrid', 'Гибрид'),
+    )
+
     station_name = models.CharField(max_length=100, default='Станция маркировки')
     station_number = models.IntegerField(
         unique=True, null=True, blank=True,
@@ -12,6 +18,8 @@ class LabelsStations(models.Model):
     station_ip = models.GenericIPAddressField(null=True, blank=True)
     station_port = models.IntegerField(default=5000)
     is_online = models.BooleanField(default=False)
+    mode = models.CharField(max_length=10, choices=MODE_CHOICES, default='online', verbose_name='Режим работы')
+    last_sync_at = models.DateTimeField(null=True, blank=True, verbose_name='Последняя синхронизация')
     created_at = models.DateTimeField(auto_now_add=True)
     changed_at = models.DateTimeField(auto_now=True, null=True)
 

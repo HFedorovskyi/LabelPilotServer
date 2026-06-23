@@ -1,0 +1,7 @@
+from django.apps import AppConfig
+
+
+class PalletsConfig(AppConfig):
+    default_auto_field = 'django.db.models.BigAutoField'
+    name = 'Pallets'
+    verbose_name = 'Паллеты'

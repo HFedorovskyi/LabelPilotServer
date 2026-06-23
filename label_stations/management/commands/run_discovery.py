@@ -1,3 +1,4 @@
+import os
 import socket
 import json
 import time
@@ -27,12 +28,42 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"Error binding to port {DISCOVERY_PORT}: {e}"))
             return
 
+        # Advertise the server over mDNS so LAN clients can use http://labelpilot.local:8000
+        self.start_mdns()
+
         # Start Receive Thread
         receive_thread = threading.Thread(target=self.listen_for_stations, args=(sock,), daemon=True)
         receive_thread.start()
 
         # Start Broadcast Loop
         self.broadcast_loop(sock)
+
+    def start_mdns(self):
+        """Advertise the server over mDNS so LAN clients can reach http://<host>.local:<port>
+        without renaming the PC or editing client hosts files. Best-effort and non-fatal:
+        skips silently if zeroconf is unavailable or the network blocks mDNS (UDP 5353)."""
+        try:
+            from zeroconf import Zeroconf, ServiceInfo
+        except ImportError:
+            self.stdout.write("zeroconf not installed - skipping mDNS (.local) advertising")
+            return
+        try:
+            ip = get_local_ip()
+            host = os.getenv("MDNS_HOSTNAME", "labelpilot").strip().lower()
+            port = int(os.getenv("PORT", "8000"))
+            info = ServiceInfo(
+                "_http._tcp.local.",
+                "LabelPilot Server._http._tcp.local.",
+                addresses=[socket.inet_aton(ip)],
+                port=port,
+                properties={b"path": b"/"},
+                server=f"{host}.local.",
+            )
+            self._zeroconf = Zeroconf()            # keep a ref so it isn't garbage-collected
+            self._zeroconf.register_service(info)
+            self.stdout.write(self.style.SUCCESS(f"mDNS: advertising http://{host}.local:{port}/ -> {ip}"))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"mDNS registration failed (non-fatal): {e}"))
 
     def broadcast_loop(self, sock):
         while True:
@@ -41,7 +72,7 @@ class Command(BaseCommand):
                 self.cleanup_offline_stations()
 
                 # Get local IP (best guess)
-                local_ip = self.get_local_ip()
+                local_ip = get_local_ip()
                 
                 msg = json.dumps({
                     "type": "LABELPILOT_SERVER",
@@ -112,7 +143,11 @@ class Command(BaseCommand):
             station.is_online = True
             station.save()
         else:
-            # Create new
+            # Create new -- but only if the license seat limit allows it.
+            from licensing import seat_available
+            if not seat_available(LabelsStations.objects.count()):
+                print(f"[LICENSE] Seat limit reached - not registering new station from {ip} ({name}).")
+                return
             generated_uuid = station_id if station_id else uuid.uuid4()
             print(f"[DEBUG] Creating new station. IP={ip}, Name={name}, Port={port}, UUID={generated_uuid} (Type: {type(generated_uuid)})")
             
