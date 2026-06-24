@@ -143,10 +143,13 @@ class Command(BaseCommand):
             station.is_online = True
             station.save()
         else:
-            # Create new -- but only if the license seat limit allows it.
-            from licensing import seat_available
+            # Create new -- but only if the seat limit allows it (no license -> demo cap).
+            from licensing import seat_available, license_status
             if not seat_available(LabelsStations.objects.count()):
-                print(f"[LICENSE] Seat limit reached - not registering new station from {ip} ({name}).")
+                _m = license_status()
+                _scope = "Demo" if not _m.get("licensed") else "License"
+                print(f"[LICENSE] {_scope} seat limit reached (max {_m.get('max_stations')}) - "
+                      f"not registering new station from {ip} ({name}). Activate a license for more.")
                 return
             generated_uuid = station_id if station_id else uuid.uuid4()
             print(f"[DEBUG] Creating new station. IP={ip}, Name={name}, Port={port}, UUID={generated_uuid} (Type: {type(generated_uuid)})")

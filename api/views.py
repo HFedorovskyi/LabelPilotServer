@@ -32,6 +32,19 @@ import json
 import requests
 from common.utils import get_local_ip
 
+
+def _require_license_for_export():
+    from django.conf import settings
+    from licensing import license_state
+    from rest_framework.exceptions import PermissionDenied
+    strict = getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False)
+    if not strict:
+        return
+    st = license_state()
+    if not (st.valid_for_key and st.machine_ok and not st.expired):
+        raise PermissionDenied("Демо-режим: экспорт данных станции недоступен без действующей лицензии. Активируйте лицензию для развёртывания реальных станций.")
+
+
 class ProductPackLinkViewSet(viewsets.ModelViewSet):
     queryset = ProductPackLink.objects.all().order_by('-created')
     serializer_class = ProductPackLinkSerializer
@@ -284,6 +297,7 @@ class FullSyncView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        _require_license_for_export()
         barcodes = BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data
         labels = LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data
         containers = PackSerializer(Pack.objects.all(), many=True).data
@@ -355,11 +369,17 @@ class StationsViewSet(viewsets.ModelViewSet):
     lookup_field = 'station_uuid'
 
     def perform_create(self, serializer):
-        # Enforce the license seat limit on API station creation (no license = unlimited).
-        from licensing import seat_available
+        # Enforce the seat limit on API station creation (no license -> demo cap).
+        from licensing import seat_available, license_status
         from rest_framework.exceptions import ValidationError
         if not seat_available(LabelsStations.objects.count()):
-            raise ValidationError({"license": "Достигнут лимит станций по лицензии."})
+            st = license_status()
+            if not st.get("licensed"):
+                msg = (f"Демо-режим: без лицензии разрешено станций — {st.get('demo_max_stations', 1)}. "
+                       f"Активируйте лицензию, чтобы добавить больше.")
+            else:
+                msg = "Достигнут лимит станций по лицензии."
+            raise ValidationError({"license": msg})
         serializer.save()
 
 
@@ -420,6 +440,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         """
         Pushes full data set to the station (Online).
         """
+        _require_license_for_export()
         station = self.get_object()
         
         if not station.station_ip:
@@ -455,6 +476,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         """
         Generates an encrypted .lps file for offline update.
         """
+        _require_license_for_export()
         from common.crypto_utils import encrypt_data
         from django.http import HttpResponse
         import datetime
@@ -475,6 +497,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         Generates an encrypted .lpi file for offline station setup.
         Now uses the unified structure and includes full data.
         """
+        _require_license_for_export()
         from common.crypto_utils import encrypt_data
         from django.http import HttpResponse
 
@@ -636,6 +659,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         if station_uuid:
             try:
                 station = LabelsStations.objects.get(station_uuid=station_uuid)
+                _require_license_for_export()
                 return Response(self._gather_sync_data(station))
             except LabelsStations.DoesNotExist:
                 pass
@@ -708,6 +732,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         """
         Downloads a single print job as an encrypted .lpj file for USB transfer.
         """
+        _require_license_for_export()
         from common.crypto_utils import encrypt_data
         from django.http import HttpResponse
         import datetime
@@ -752,6 +777,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         grouped by station. Ideal for USB transfer of multiple jobs at once.
         Optionally filter by station with ?station_id=<id>.
         """
+        _require_license_for_export()
         from common.crypto_utils import encrypt_data
         from django.http import HttpResponse
         import datetime

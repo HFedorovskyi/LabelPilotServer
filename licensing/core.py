@@ -245,13 +245,21 @@ def seat_limit() -> Optional[int]:
     return lic.max_stations if lic else None
 
 
+# DEMO mode: with NO license the product runs limited — at most DEMO_MAX_STATIONS
+# station(s) may register, so a real multi-station line must buy a license. The data key
+# stays lenient (legacy fallback) so demo data is never bricked — only seats are capped
+# (plus the UI banner + label watermark). Tune this constant to taste.
+DEMO_MAX_STATIONS = 1
+
+
 def seat_available(current_count: int) -> bool:
-    """True if a NEW station may be registered. No license -> unlimited (lenient).
-    A present-but-invalid (bad signature / expired / wrong-machine) license blocks new
-    seats; an unlimited (max_stations=None) valid license never does."""
+    """True if a NEW station may be registered.
+    No license  -> DEMO: capped at DEMO_MAX_STATIONS.
+    Present-but-invalid (bad signature / expired / wrong-machine) -> blocked.
+    Valid license -> its max_stations (None = unlimited)."""
     st = license_state()
     if not st.present:
-        return True  # pre-licensing installs stay unrestricted
+        return current_count < DEMO_MAX_STATIONS   # demo cap (was: unlimited)
     if not st.valid_for_key:      # present but bad signature
         return False
     if st.expired or not st.machine_ok:
@@ -264,13 +272,14 @@ def license_status() -> dict:
     lic = load_license()
     if lic is None:
         return {
-            "licensed": False, "edition": "unlicensed", "customer": None,
-            "expires": None, "expired": False, "max_stations": None,
+            "licensed": False, "mode": "demo", "edition": "demo",
+            "customer": None, "expires": None, "expired": False,
+            "max_stations": DEMO_MAX_STATIONS, "demo_max_stations": DEMO_MAX_STATIONS,
             "license_id": None, "machine_id": machine_id(),
         }
     return {
-        "licensed": True, "edition": lic.edition, "customer": lic.customer,
+        "licensed": True, "mode": "licensed", "edition": lic.edition, "customer": lic.customer,
         "expires": lic.expires, "expired": lic.is_expired(),
-        "max_stations": lic.max_stations, "license_id": lic.license_id,
-        "features": lic.features, "machine_id": machine_id(),
+        "max_stations": lic.max_stations, "demo_max_stations": DEMO_MAX_STATIONS,
+        "license_id": lic.license_id, "features": lic.features, "machine_id": machine_id(),
     }

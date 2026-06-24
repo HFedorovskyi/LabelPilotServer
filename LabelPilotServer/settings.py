@@ -217,7 +217,7 @@ def _read_version_file() -> str:
 
 VERSION = _read_version_file()
 MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.3.0')
-LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.3.0')
+LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.3.1')
 
 
 
