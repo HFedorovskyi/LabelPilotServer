@@ -74,9 +74,17 @@ def _read_import_df(file_obj, sep_param, nrows=None):
 
 
 def _import_to_int(raw, default=0):
-    s = str(raw).strip()
+    s = str(raw).strip().replace(',', '.')
     try:
         return int(float(s)) if s else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _import_to_float(raw, default=0.0):
+    s = str(raw).strip().replace(',', '.')   # Russian Excel uses a comma decimal
+    try:
+        return float(s) if s else default
     except (ValueError, TypeError):
         return default
 
@@ -145,8 +153,9 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
         except Exception as e:
             return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        article_col, name_col = mapping.get('article'), mapping.get('name')
-        exp_col, box_col = mapping.get('exp_date'), mapping.get('close_box_counter')
+        cols = {k: mapping.get(k) for k in (
+            'article', 'name', 'exp_date', 'close_box_counter',
+            'fixed_weight_grams', 'min_weight_grams', 'max_weight_grams')}
         extra_map = mapping.get('extra_data_map') or {}
         static = mapping.get('staticValues') or {}
         static_fk = {}
@@ -157,13 +166,18 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
             if static.get(src):
                 static_fk[dst] = static[src]
 
+        def cell(row, key):
+            col = cols[key]
+            return row.get(col, '') if col else ''
+
         # 1) Validate EVERY row up front (collect all errors), dedup by article (last wins).
+        #    to_dict('records') iterates plain dicts — far faster than DataFrame.iterrows().
         errors, parsed = [], {}
-        for index, row in df.iterrows():
-            article = str(row.get(article_col, '')).strip() if article_col else ''
-            name = str(row.get(name_col, '')).strip() if name_col else ''
+        for i, row in enumerate(df.to_dict('records')):
+            article = str(cell(row, 'article')).strip()
+            name = str(cell(row, 'name')).strip()
             if not article or not name:
-                errors.append(f"Строка {index + 2}: нет артикула или названия")
+                errors.append(f"Строка {i + 2}: нет артикула или названия")
                 continue
             extra = {}
             for attr_name, col in extra_map.items():
@@ -171,18 +185,33 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
                     val = row.get(col)
                     if val is not None and str(val).strip() not in ('', 'None'):
                         extra[attr_name] = val
+            fwg = _import_to_float(cell(row, 'fixed_weight_grams'))
             parsed[article] = dict(
                 name=name,
-                exp_date=_import_to_int(row.get(exp_col, '')) if exp_col else 0,
-                close_box_counter=_import_to_int(row.get(box_col, '')) if box_col else 0,
+                exp_date=_import_to_int(cell(row, 'exp_date')),
+                close_box_counter=_import_to_int(cell(row, 'close_box_counter')),
+                fixed_weight_grams=fwg,
+                min_weight_grams=_import_to_float(cell(row, 'min_weight_grams')),
+                max_weight_grams=_import_to_float(cell(row, 'max_weight_grams')),
+                is_fixed_weight=fwg > 0,   # a product with a fixed weight set IS fixed-weight
                 extra_data=extra,
                 **static_fk,
             )
 
-        # 2) One read of existing rows, then a single bulk create + bulk update in a txn.
+        if not parsed:
+            return Response({'success': True, 'imported': 0, 'created': 0, 'updated': 0,
+                             'errors': errors[:10], 'error_count': len(errors)})
+
+        # 2) Fetch existing in chunks (huge files would blow the SQLite param limit), then a
+        #    single bulk create + bulk update in one transaction.
         from django.db import transaction
+        from django.db.models import Max
         from django.utils import timezone
-        existing = {n.article: n for n in Nomenclature.objects.filter(article__in=list(parsed.keys()))}
+        existing, arts = {}, list(parsed.keys())
+        for j in range(0, len(arts), 900):
+            for n in Nomenclature.objects.filter(article__in=arts[j:j + 900]):
+                existing[n.article] = n
+
         to_create, to_update, upd_fields = [], [], set()
         for article, fields in parsed.items():
             if article in existing:
@@ -195,6 +224,11 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
                 to_update.append(obj)
             else:
                 to_create.append(Nomenclature(article=article, **fields))
+
+        if to_create:   # give new rows incrementing sort order after the current max
+            next_order = (Nomenclature.objects.aggregate(m=Max('order'))['m'] or 0) + 1
+            for idx, obj in enumerate(to_create):
+                obj.order = next_order + idx
 
         try:
             with transaction.atomic():
