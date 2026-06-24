@@ -14,6 +14,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
+from api.i18n import tr
+
 _MODEL_BACKEND = "django.contrib.auth.backends.ModelBackend"
 
 
@@ -58,7 +60,7 @@ class LoginView(APIView):
         password = request.data.get("password") or ""
         user = authenticate(request, username=username, password=password)
         if user is None or not user.is_active:
-            return Response({"detail": "Неверный логин или пароль."},
+            return Response({"detail": tr('auth.invalidCredentials')},
                             status=status.HTTP_401_UNAUTHORIZED)
         login(request, user)
         return Response(user_payload(user))
@@ -94,11 +96,11 @@ class BootstrapView(APIView):
         username = (request.data.get("username") or "").strip()
         password = request.data.get("password") or ""
         if not username or not password:
-            return Response({"detail": "Укажите логин и пароль."},
+            return Response({"detail": tr('common.loginPasswordRequired')},
                             status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             if User.objects.exists():
-                return Response({"detail": "Администратор уже существует."},
+                return Response({"detail": tr('auth.adminExists')},
                                 status=status.HTTP_409_CONFLICT)
             ensure_groups()
             user = User.objects.create_superuser(username=username, password=password)

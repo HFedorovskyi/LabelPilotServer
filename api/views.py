@@ -31,6 +31,7 @@ import base64
 import json
 import requests
 from common.utils import get_local_ip
+from api.i18n import tr
 
 
 def _require_license_for_export():
@@ -49,7 +50,7 @@ def _require_license_for_export():
     from rest_framework.exceptions import PermissionDenied
     st = license_state()
     if not (st.valid_for_key and st.machine_ok and not st.expired):
-        raise PermissionDenied("Демо-режим: экспорт данных станции недоступен без действующей лицензии. Активируйте лицензию для развёртывания реальных станций.")
+        raise PermissionDenied(tr('license.exportDenied'))
 
 
 class ProductPackLinkViewSet(viewsets.ModelViewSet):
@@ -186,7 +187,7 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
             article = str(cell(row, 'article')).strip()
             name = str(cell(row, 'name')).strip()
             if not article or not name:
-                errors.append(f"Строка {i + 2}: нет артикула или названия")
+                errors.append(tr('import.rowMissingArticleOrName', row=i + 2))
                 continue
             extra = {}
             for attr_name, col in extra_map.items():
@@ -284,7 +285,7 @@ class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
         product_id = request.data.get('product_id')
 
         if not structure:
-            return Response({'errors': ['Не передана структура штрихкода.']}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'errors': [tr('barcode.noStructure')]}, status=status.HTTP_400_BAD_REQUEST)
 
         # Validate the structure before rendering. Returns 400 {errors: [...]}.
         validation_errors = validate_structure(structure)
@@ -408,7 +409,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         from licensing import seat_available
         from rest_framework.exceptions import ValidationError
         if not seat_available(LabelsStations.objects.count()):
-            raise ValidationError({"license": "Достигнут лимит станций по лицензии (или лицензия недействительна)."})
+            raise ValidationError({"license": tr('station.seatLimitReached')})
         serializer.save()
 
 
@@ -753,7 +754,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         if not station.station_ip:
             job.status = 'error'
             job.save(update_fields=['status', 'updated_at'])
-            return Response({'error': 'У станции не указан IP адрес'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': tr('station.noIp')}, status=status.HTTP_400_BAD_REQUEST)
 
         payload = {
             'type': 'PRINT_JOB',
@@ -776,11 +777,11 @@ class PrintJobViewSet(viewsets.ModelViewSet):
             job.status = 'sent'
             job.save(update_fields=['status', 'updated_at'])
             log_event('job_sent', f'Задание #{job.pk} «{job.nomenclature.name}» отправлено на станцию «{station.station_name}»')
-            return Response({'status': 'success', 'message': f'Задание отправлено на станцию "{station.station_name}"'})
+            return Response({'status': 'success', 'message': tr('job.sentToStation', station=station.station_name)})
         except requests.RequestException as e:
             job.status = 'error'
             job.save(update_fields=['status', 'updated_at'])
-            return Response({'error': f'Ошибка отправки: {str(e)}'}, status=status.HTTP_502_BAD_GATEWAY)
+            return Response({'error': tr('job.sendError', error=str(e))}, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=True, methods=['get'])
     def download_for_usb(self, request, pk=None):
@@ -843,7 +844,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
             qs = qs.filter(station_id=station_id)
 
         if not qs.exists():
-            return Response({'error': 'Нет ожидающих заданий'}, status=status.HTTP_404_NOT_FOUND)
+            return Response({'error': tr('job.noPending')}, status=status.HTTP_404_NOT_FOUND)
 
         stations_data = {}
         job_ids = []

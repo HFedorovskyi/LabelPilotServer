@@ -99,6 +99,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'api.i18n.LangMiddleware',  # set per-request language (X-Lang header) for tr() messages
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -235,6 +236,14 @@ else:
         "http://localhost:3000",
         "http://127.0.0.1:3000",
     ]
+
+# Allow the SPA's custom language header through CORS preflight (cross-origin dev only;
+# the shipped static export is same-origin). 'x-lang' selects the API message language.
+try:
+    from corsheaders.defaults import default_headers as _cors_default_headers
+    CORS_ALLOW_HEADERS = list(_cors_default_headers) + ["x-lang"]
+except Exception:
+    pass
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',

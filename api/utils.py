@@ -3,6 +3,7 @@ import io
 import base64
 import json
 from datetime import datetime, timedelta
+from api.i18n import tr
 
 
 # --- Shared allowed sets (must mirror the frontend contract) ---
@@ -66,59 +67,53 @@ def validate_structure(structure):
     errors = []
 
     if not isinstance(structure, dict):
-        return ['Структура штрихкода должна быть объектом с полями "barcode_type" и "fields".']
+        return [tr('barcode.structureMustBeObject')]
 
     barcode_type = structure.get('barcode_type')
     if barcode_type not in ALLOWED_BARCODE_TYPES:
         errors.append(
-            'Недопустимый тип штрихкода "{}". Разрешены: {}.'.format(
-                barcode_type, ', '.join(sorted(ALLOWED_BARCODE_TYPES))
-            )
+            tr('barcode.invalidType', type=barcode_type, allowed=', '.join(sorted(ALLOWED_BARCODE_TYPES)))
         )
 
     is_gs1 = barcode_type in GS1_BARCODE_TYPES
 
     fields = structure.get('fields')
     if not isinstance(fields, list) or len(fields) == 0:
-        errors.append('Список полей не может быть пустым.')
+        errors.append(tr('barcode.fieldsEmpty'))
         fields = []
 
     for index, field in enumerate(fields, start=1):
         if not isinstance(field, dict):
-            errors.append('Поле №{} имеет неверный формат.'.format(index))
+            errors.append(tr('barcode.fieldBadFormat', index=index))
             continue
 
         f_type = field.get('field_type')
         if f_type not in ALLOWED_FIELD_TYPES:
-            errors.append('Поле №{}: недопустимый тип поля "{}".'.format(index, f_type))
+            errors.append(tr('barcode.fieldInvalidType', index=index, type=f_type))
             continue
 
         # GS1-only fields are not allowed on ean13/code128.
         if f_type in GS1_ONLY_FIELD_TYPES and not is_gs1:
             errors.append(
-                'Поле №{}: тип "{}" допустим только для GS1-штрихкодов (databarexpandedstacked, gs1qrcode).'.format(
-                    index, f_type
-                )
+                tr('barcode.fieldGs1Only', index=index, type=f_type)
             )
 
         if f_type == 'constanta':
             value = field.get('value', '')
             if value is None or str(value) == '':
-                errors.append('Поле №{}: константа должна иметь непустое значение.'.format(index))
+                errors.append(tr('barcode.constEmpty', index=index))
             elif barcode_type == 'ean13' and not str(value).isdigit():
                 errors.append(
-                    'Поле №{}: для EAN13 константа может содержать только цифры.'.format(index)
+                    tr('barcode.ean13DigitsOnly', index=index)
                 )
 
         if f_type == 'ai':
             ai_value = field.get('value', '')
             if ai_value is None or str(ai_value) == '':
-                errors.append('Поле №{}: для AI необходимо указать значение.'.format(index))
+                errors.append(tr('barcode.aiValueRequired', index=index))
             elif str(ai_value) not in ALLOWED_AI_VALUES:
                 errors.append(
-                    'Поле №{}: недопустимый AI "{}". Разрешены: {}.'.format(
-                        index, ai_value, ', '.join(sorted(ALLOWED_AI_VALUES))
-                    )
+                    tr('barcode.aiInvalid', index=index, ai=ai_value, allowed=', '.join(sorted(ALLOWED_AI_VALUES)))
                 )
 
         # length / decimalPlaces, when present and used, must be all-digits.
@@ -126,7 +121,7 @@ def validate_structure(structure):
             if attr in field and field.get(attr) not in (None, ''):
                 if not str(field.get(attr)).isdigit():
                     errors.append(
-                        'Поле №{}: параметр "{}" должен содержать только цифры.'.format(index, attr)
+                        tr('barcode.attrDigitsOnly', index=index, attr=attr)
                     )
 
         # For EAN13 every field must be digit-producing (no ai/fnc1/gs).
@@ -208,10 +203,7 @@ class BarcodeGenerator:
 
             if not ean_payload.isdigit() or len(ean_payload) != 12:
                 raise ValueError(
-                    'Невозможно сформировать EAN13: данные должны содержать ровно 12 цифр '
-                    'до контрольной цифры, получено "{}" ({} симв.). Проверьте поля шаблона.'.format(
-                        ean_payload, len(ean_payload)
-                    )
+                    tr('barcode.ean13Need12', data=ean_payload, len=len(ean_payload))
                 )
 
             barcode_data = self.calculate_ean13_checksum(ean_payload)
@@ -281,7 +273,7 @@ class BarcodeGenerator:
             elif f_type == 'fnc1':
                 # For GS1 symbologies FNC1 is auto-inserted from the (AI) notation,
                 # so this is a no-op marker, but we acknowledge it explicitly.
-                warnings.append('Поле "fnc1" учтено: FNC1 вставляется автоматически из нотации (AI).')
+                warnings.append(tr('barcode.fnc1Noted'))
 
             elif f_type == 'gs':
                 # Group separator -> ASCII 29.
@@ -320,8 +312,7 @@ class BarcodeGenerator:
                 string_for_generation += self.format_runtime_dummy(f_type, length)
                 if not warned_runtime:
                     warnings.append(
-                        'Предпросмотр использует тестовые данные для полей реального времени '
-                        '(номер упаковки/короба/паллеты, количество коробов, номер партии).'
+                        tr('barcode.previewTestData')
                     )
                     warned_runtime = True
 
@@ -338,8 +329,8 @@ class BarcodeGenerator:
         if self.AI_presence:
             data_for_barcode = (max(length, 1) - 1) * '9'
             return self.calculate_gtin14_checksum(data_for_barcode), \
-                'Артикул: товар не выбран, используется тестовое значение.'
-        return (max(length, 0) * '9'), 'Артикул: товар не выбран, используется тестовое значение.'
+                tr('barcode.articleNotSelected')
+        return (max(length, 0) * '9'), tr('barcode.articleNotSelected')
 
     def _resolve_pack_count(self, item, product):
         length = safe_int(item.get('length', '2'), 2)
@@ -347,7 +338,7 @@ class BarcodeGenerator:
             raw = str(int(product.close_box_counter))
             return self._fit_number(raw, length), None
         return self._fit_number('99', length), \
-            'Количество вложений: товар не выбран, используется тестовое значение.'
+            tr('barcode.packCountTestData')
 
     def _resolve_extra_data(self, item, product):
         field_name = item.get('value', '')
@@ -357,7 +348,7 @@ class BarcodeGenerator:
             raw = str(product.extra_data[field_name])
             return self._fit_number(raw, length), None
         return self._fit_number('9' * max(length, 1), length), \
-            'Доп. поле "{}": нет данных у товара, используется тестовое значение.'.format(field_name)
+            tr('barcode.extraFieldTestData', field=field_name)
 
     def _resolve_weight(self, item, product, is_fixed_weight):
         length = item.get('length', '6')
@@ -369,7 +360,7 @@ class BarcodeGenerator:
             return self.format_weight_types(kilograms, length, decimal_places), None
         # No fixed weight available -> sampled value.
         return self.format_weight_types(99.999, length, decimal_places), \
-            'Вес: у товара не задан фиксированный вес, используется тестовое значение.'
+            tr('barcode.weightTestData')
 
     def _resolve_date(self, item, product, f_type):
         date_format = item.get('dateFormat', 'ddMMyy')

@@ -12,6 +12,7 @@ from BarcodeTemplates.models import BarcodeTemplate
 from Nomenclature.models import Nomenclature
 from server_activity.models import ServerEvent
 import datetime
+from api.i18n import tr
 
 
 class StatisticsView(APIView):
@@ -80,7 +81,7 @@ class StatisticsView(APIView):
         ).annotate(count=Count('id')).order_by('-count')[:5]
         top_stations = [
             {
-                "name": item['station__station_name'] or "Неизвестная станция",
+                "name": item['station__station_name'] or tr('stats.unknownStation'),
                 "number": item['station__station_number'],
                 "count": item['count']
             }
@@ -93,7 +94,7 @@ class StatisticsView(APIView):
         ).annotate(count=Count('id')).order_by('-count')[:5]
         top_products = [
             {
-                "name": item['product_name_snapshot'] or "Неизвестный товар",
+                "name": item['product_name_snapshot'] or tr('stats.unknownProduct'),
                 "count": item['count']
             }
             for item in top_products_qs
@@ -104,7 +105,7 @@ class StatisticsView(APIView):
         recent_logs = [
             {
                 "id": log.id,
-                "station": log.station.station_name if log.station else "Неизвестная станция",
+                "station": log.station.station_name if log.station else tr('stats.unknownStation'),
                 "level": log.level,
                 "message": log.message,
                 "timestamp": log.timestamp.isoformat()

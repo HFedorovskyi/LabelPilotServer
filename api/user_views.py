@@ -8,6 +8,7 @@ from rest_framework.response import Response
 
 from api.permissions import IsAdmin
 from api.auth_views import role_of, ensure_groups
+from api.i18n import tr
 
 
 class UserSerializer(serializers.ModelSerializer):
@@ -45,11 +46,11 @@ class UserViewSet(viewsets.ModelViewSet):
         password = request.data.get("password") or ""
         role = request.data.get("role") or "manager"
         if not username or not password:
-            return Response({"detail": "Укажите логин и пароль."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": tr('common.loginPasswordRequired')}, status=status.HTTP_400_BAD_REQUEST)
         if role not in ("admin", "manager"):
-            return Response({"detail": "Недопустимая роль."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": tr('user.invalidRole')}, status=status.HTTP_400_BAD_REQUEST)
         if User.objects.filter(username=username).exists():
-            return Response({"detail": "Такой пользователь уже существует."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": tr('user.alreadyExists')}, status=status.HTTP_400_BAD_REQUEST)
         user = User.objects.create_user(username=username, password=password, is_staff=True)
         self._apply_role(user, role)
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
@@ -63,10 +64,10 @@ class UserViewSet(viewsets.ModelViewSet):
         demoting = new_role == "manager" and role_of(user) == "admin"
         deactivating = new_active is False and user.is_active
         if (demoting or deactivating) and role_of(user) == "admin" and _active_admin_count(exclude_id=user.id) == 0:
-            return Response({"detail": "Нельзя снять права/деактивировать последнего администратора."},
+            return Response({"detail": tr('user.cannotDemoteLastAdmin')},
                             status=status.HTTP_400_BAD_REQUEST)
         if deactivating and user.id == request.user.id:
-            return Response({"detail": "Нельзя деактивировать самого себя."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": tr('user.cannotDeactivateSelf')}, status=status.HTTP_400_BAD_REQUEST)
 
         if new_role is not None:
             self._apply_role(user, new_role)
@@ -80,8 +81,8 @@ class UserViewSet(viewsets.ModelViewSet):
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
         if user.id == request.user.id:
-            return Response({"detail": "Нельзя удалить самого себя."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"detail": tr('user.cannotDeleteSelf')}, status=status.HTTP_400_BAD_REQUEST)
         if role_of(user) == "admin" and _active_admin_count(exclude_id=user.id) == 0:
-            return Response({"detail": "Нельзя удалить последнего администратора."},
+            return Response({"detail": tr('user.cannotDeleteLastAdmin')},
                             status=status.HTTP_400_BAD_REQUEST)
         return super().destroy(request, *args, **kwargs)
