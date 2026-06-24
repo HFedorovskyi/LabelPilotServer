@@ -238,8 +238,15 @@ else:
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # CLOSED BY DEFAULT: every endpoint requires login unless it explicitly sets
+    # AllowAny. Station/handshake endpoints (ping/sync/download/upload_report/version/
+    # license) and the auth endpoints opt back in to AllowAny. A forgotten new endpoint
+    # fails safe (401) instead of fails open.
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
     ],
 }
 

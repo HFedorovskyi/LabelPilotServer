@@ -92,7 +92,7 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
                 
         return Response({'results': results})
 
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    @action(detail=False, methods=['post'])
     def preview_import(self, request):
         file_obj = request.FILES.get('file')
         sep_param = request.data.get('separator')
@@ -126,7 +126,7 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
         except Exception as e:
              return Response({'error': f'Parsing failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    @action(detail=False, methods=['post'])
     def execute_import(self, request):
         file_obj = request.FILES.get('file')
         mapping_str = request.data.get('mapping')
@@ -368,6 +368,18 @@ class StationsViewSet(viewsets.ModelViewSet):
     serializer_class = LabelsStationsSerializer
     lookup_field = 'station_uuid'
 
+    # Station/handshake endpoints stay OPEN (stations have no user session) — gated by
+    # license (_require_license_for_export) + the LAN boundary, not user auth. Everything
+    # else (station CRUD, send-to-station) inherits closed-by-default IsAuthenticated.
+    _PUBLIC_ACTIONS = {"ping", "server_ip", "full_dump", "upload_report",
+                       "download_identity", "download_update", "sync_data"}
+
+    def get_permissions(self):
+        from rest_framework.permissions import AllowAny
+        if getattr(self, "action", None) in self._PUBLIC_ACTIONS:
+            return [AllowAny()]
+        return super().get_permissions()
+
     def perform_create(self, serializer):
         # Enforce the seat limit on API station creation (no license -> demo cap).
         from licensing import seat_available, license_status
@@ -414,9 +426,20 @@ class StationsViewSet(viewsets.ModelViewSet):
             "server_url": server_url
         }
 
+        # Operators for this station (station-specific + the shared/global pool). pin_hash
+        # is included so the client validates PINs locally/offline. License-gated like the
+        # rest of the bundle (the export endpoints call _require_license_for_export).
+        from label_stations.models import Operator
+        from django.db.models import Q
+        operators = [{
+            "uuid": str(o.uuid), "full_name": o.full_name, "short_code": o.short_code,
+            "pin_hash": o.pin_hash, "is_active": o.is_active,
+        } for o in Operator.objects.filter(is_active=True).filter(Q(station=station) | Q(station__isnull=True))]
+
         data = {
             "station": station_info,
             "payload": {
+                "operators": operators,
                 "barcodes": barcodes,
                 "labels": labels,
                 "containers": containers,
@@ -680,6 +703,15 @@ class StationsViewSet(viewsets.ModelViewSet):
 class PrintJobViewSet(viewsets.ModelViewSet):
     queryset = PrintJob.objects.all().select_related('station', 'nomenclature')
     serializer_class = PrintJobSerializer
+
+    # USB download endpoints stay open for the offline/USB transfer flow.
+    _PUBLIC_ACTIONS = {"download_for_usb", "download_usb_bundle"}
+
+    def get_permissions(self):
+        from rest_framework.permissions import AllowAny
+        if getattr(self, "action", None) in self._PUBLIC_ACTIONS:
+            return [AllowAny()]
+        return super().get_permissions()
 
     def perform_create(self, serializer):
         job = serializer.save()

@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.contrib.auth.hashers import make_password
 
 
 class LabelsStations(models.Model):
@@ -38,3 +39,27 @@ class LabelsStations(models.Model):
 
     def __str__(self):
         return f"[{self.station_number:02d}] {self.station_name}" if self.station_number else self.station_name
+
+
+class Operator(models.Model):
+    """Factory-floor worker. Server-managed master data, synced to client stations and
+    used for print attribution. NOT a Django auth User. PIN is stored hashed; the hash
+    is synced so the client can validate the PIN locally/offline (workflow + audit, not
+    a security boundary). station=null -> available on ALL stations (shared pool)."""
+    uuid = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    full_name = models.CharField(max_length=200, verbose_name='ФИО')
+    short_code = models.CharField(max_length=50, blank=True, default='', verbose_name='Код/таб. номер')
+    pin_hash = models.CharField(max_length=255, blank=True, default='')
+    is_active = models.BooleanField(default=True)
+    station = models.ForeignKey(
+        'LabelsStations', null=True, blank=True, on_delete=models.CASCADE,
+        related_name='operators', verbose_name='Станция',
+        help_text='Пусто = доступен на всех станциях',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def set_pin(self, pin):
+        self.pin_hash = make_password(str(pin)) if pin not in (None, '') else ''
+
+    def __str__(self):
+        return self.full_name
