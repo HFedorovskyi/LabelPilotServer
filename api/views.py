@@ -34,12 +34,19 @@ from common.utils import get_local_ip
 
 
 def _require_license_for_export():
-    from django.conf import settings
+    """Pushing REAL station data (nomenclature, identity, sync bundle) requires a valid
+    license — ALWAYS, independent of LICENSE_REQUIRED/STRICT. This is THE commercial
+    boundary the vendor chose: without a license the product runs in demo (full local UI
+    + the built-in client demo with a station/printer/scale work fine), but real data is
+    never exported to a station. STRICT mode governs other things (station registration,
+    closed-by-default endpoints); it does NOT relax this gate.
+
+    The gate is deliberately stricter than `valid_for_key`: it also requires the license
+    be machine-bound-OK and not expired. Decryption of EXISTING data must never brick
+    (that's what valid_for_key guards), but exporting NEW data is an active commercial
+    action that demands a fully-valid, non-expired, correctly-bound license."""
     from licensing import license_state
     from rest_framework.exceptions import PermissionDenied
-    strict = getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False)
-    if not strict:
-        return
     st = license_state()
     if not (st.valid_for_key and st.machine_ok and not st.expired):
         raise PermissionDenied("Демо-режим: экспорт данных станции недоступен без действующей лицензии. Активируйте лицензию для развёртывания реальных станций.")
