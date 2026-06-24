@@ -245,8 +245,12 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': [
         'rest_framework.permissions.IsAuthenticated',
     ],
+    # SessionAuthentication401 keeps a genuine "not logged in" as HTTP 401 (default DRF
+    # SessionAuthentication downgrades it to 403, which is then indistinguishable from a
+    # license/permission/CSRF denial). The SPA logs out ONLY on 401 — a license 403 must
+    # surface as an in-app demo message, not bounce the user to the login screen.
     'DEFAULT_AUTHENTICATION_CLASSES': [
-        'rest_framework.authentication.SessionAuthentication',
+        'api.authentication.SessionAuthentication401',
     ],
 }
 

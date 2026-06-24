@@ -102,6 +102,8 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def send_to_stations(self, request):
+        # Pushing the real nomenclature table to station IPs is a real-data export -> gated.
+        _require_license_for_export()
         stations_uuids = request.data.get('stations', [])
         if not stations_uuids:
              return Response({'error': 'No stations provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -692,16 +694,20 @@ class StationsViewSet(viewsets.ModelViewSet):
         Now reuses gather_sync_data logic if possible, or keeps separate.
         Let's unify slightly but keep structure compatible.
         """
+        # full_dump is AllowAny (stations have no user session). The gate must run FIRST,
+        # unconditionally — otherwise an anonymous request with no/unknown station_uuid
+        # falls through to the fallback below and leaks the entire dataset with no license.
+        _require_license_for_export()
+
         station_number = None
         station_uuid = request.query_params.get('station_uuid')
         if station_uuid:
             try:
                 station = LabelsStations.objects.get(station_uuid=station_uuid)
-                _require_license_for_export()
                 return Response(self._gather_sync_data(station))
             except LabelsStations.DoesNotExist:
                 pass
-        
+
         # Fallback if no station identified
         data = {
             'barcodes': BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data,
@@ -739,6 +745,8 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         """
         Sends a print job to the assigned station via HTTP.
         """
+        # Pushing a real print job (nomenclature payload) to a station is a data export -> gated.
+        _require_license_for_export()
         job = self.get_object()
         station = job.station
 
