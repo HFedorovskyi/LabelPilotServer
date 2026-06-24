@@ -54,6 +54,33 @@ class GlobalProductAttributeViewSet(viewsets.ModelViewSet):
     serializer_class = GlobalProductAttributeSerializer
 
 
+def _read_import_df(file_obj, sep_param, nrows=None):
+    """Read an uploaded .csv/.xls/.xlsx into a pandas DataFrame. CSV is decoded utf-8
+    then cp1251 (Russian Excel exports); separator 'auto'/empty -> sniffed by pandas."""
+    import pandas as pd
+    import io
+    name = (file_obj.name or '').lower()
+    if name.endswith('.csv'):
+        raw = file_obj.read()
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            text = raw.decode('cp1251')
+        sep = None if sep_param in (None, '', 'auto') else sep_param
+        return pd.read_csv(io.StringIO(text), sep=sep, nrows=nrows, on_bad_lines='skip', engine='python')
+    if name.endswith(('.xls', '.xlsx')):
+        return pd.read_excel(file_obj, nrows=nrows)
+    raise ValueError('Unsupported file format')
+
+
+def _import_to_int(raw, default=0):
+    s = str(raw).strip()
+    try:
+        return int(float(s)) if s else default
+    except (ValueError, TypeError):
+        return default
+
+
 class NomenclatureViewSet(viewsets.ModelViewSet):
     queryset = Nomenclature.objects.all().order_by('-created')
     serializer_class = NomenclatureSerializer
@@ -95,144 +122,97 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'])
     def preview_import(self, request):
         file_obj = request.FILES.get('file')
-        sep_param = request.data.get('separator')
         if not file_obj:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
         try:
-            import pandas as pd
-            filename = file_obj.name.lower()
-            if filename.endswith('.csv'):
-                try:
-                    file_content = file_obj.read().decode('utf-8')
-                except UnicodeDecodeError:
-                    file_obj.seek(0)
-                    file_content = file_obj.read().decode('cp1251')
-                import io
-                
-                sep_val = None if sep_param == 'auto' or not sep_param else sep_param
-                df = pd.read_csv(io.StringIO(file_content), nrows=10, sep=sep_val, on_bad_lines='skip', engine='python')
-            elif filename.endswith(('.xls', '.xlsx')):
-                df = pd.read_excel(file_obj, nrows=10)
-            else:
-                return Response({'error': 'Unsupported file format'}, status=status.HTTP_400_BAD_REQUEST)
-            
-            columns = df.columns.tolist()
-            # Replace all NaN/None with empty string for JSON safety
-            df = df.fillna('')
-            preview_data = df.to_dict(orient='records')
-            
-            return Response({'columns': columns, 'preview': preview_data})
+            df = _read_import_df(file_obj, request.data.get('separator'), nrows=10).fillna('')
         except Exception as e:
-             return Response({'error': f'Parsing failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': f'Parsing failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'columns': df.columns.tolist(), 'preview': df.to_dict(orient='records')})
 
     @action(detail=False, methods=['post'])
     def execute_import(self, request):
         file_obj = request.FILES.get('file')
         mapping_str = request.data.get('mapping')
-        sep_param = request.data.get('separator')
-        
         if not file_obj or not mapping_str:
             return Response({'error': 'File or mapping not provided'}, status=status.HTTP_400_BAD_REQUEST)
-            
         try:
-            import json
             mapping = json.loads(mapping_str)
         except json.JSONDecodeError:
             return Response({'error': 'Invalid mapping format json'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            df = _read_import_df(file_obj, request.data.get('separator')).fillna('')
+        except Exception as e:
+            return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        article_col, name_col = mapping.get('article'), mapping.get('name')
+        exp_col, box_col = mapping.get('exp_date'), mapping.get('close_box_counter')
+        extra_map = mapping.get('extra_data_map') or {}
+        static = mapping.get('staticValues') or {}
+        static_fk = {}
+        for src, dst in (('portionContainerId', 'portion_container_id'),
+                         ('boxContainerId', 'box_container_id'),
+                         ('packLabelId', 'templates_pack_label_id'),
+                         ('boxLabelId', 'templates_box_label_id')):
+            if static.get(src):
+                static_fk[dst] = static[src]
+
+        # 1) Validate EVERY row up front (collect all errors), dedup by article (last wins).
+        errors, parsed = [], {}
+        for index, row in df.iterrows():
+            article = str(row.get(article_col, '')).strip() if article_col else ''
+            name = str(row.get(name_col, '')).strip() if name_col else ''
+            if not article or not name:
+                errors.append(f"Строка {index + 2}: нет артикула или названия")
+                continue
+            extra = {}
+            for attr_name, col in extra_map.items():
+                if col:
+                    val = row.get(col)
+                    if val is not None and str(val).strip() not in ('', 'None'):
+                        extra[attr_name] = val
+            parsed[article] = dict(
+                name=name,
+                exp_date=_import_to_int(row.get(exp_col, '')) if exp_col else 0,
+                close_box_counter=_import_to_int(row.get(box_col, '')) if box_col else 0,
+                extra_data=extra,
+                **static_fk,
+            )
+
+        # 2) One read of existing rows, then a single bulk create + bulk update in a txn.
+        from django.db import transaction
+        from django.utils import timezone
+        existing = {n.article: n for n in Nomenclature.objects.filter(article__in=list(parsed.keys()))}
+        to_create, to_update, upd_fields = [], [], set()
+        for article, fields in parsed.items():
+            if article in existing:
+                obj = existing[article]
+                for k, v in fields.items():
+                    setattr(obj, k, v)
+                    upd_fields.add(k)
+                obj.edited = timezone.now()
+                upd_fields.add('edited')
+                to_update.append(obj)
+            else:
+                to_create.append(Nomenclature(article=article, **fields))
 
         try:
-            import pandas as pd
-            filename = file_obj.name.lower()
-            if filename.endswith('.csv'):
-                try:
-                    file_content = file_obj.read().decode('utf-8')
-                except UnicodeDecodeError:
-                    file_obj.seek(0)
-                    file_content = file_obj.read().decode('cp1251')
-                import io
-                sep_val = None if sep_param == 'auto' or not sep_param else sep_param
-                df = pd.read_csv(io.StringIO(file_content), sep=sep_val, on_bad_lines='skip', engine='python')
-            else:
-                df = pd.read_excel(file_obj)
-                
-            # Replace NaN with None for clean data handling
-            df = df.fillna('')
-            
-            success_count = 0
-            error_count = 0
-            errors = []
-            
-            for index, row in df.iterrows():
-                try:
-                    article_col = mapping.get('article')
-                    name_col = mapping.get('name')
-                    
-                    article = str(row.get(article_col, '')).strip() if article_col else ''
-                    name = str(row.get(name_col, '')).strip() if name_col else ''
-                    
-                    if not article or not name:
-                        error_count += 1
-                        errors.append(f"Row {index+2}: Missing required article or name")
-                        continue
-                        
-                    exp_date_col = mapping.get('exp_date')
-                    exp_date_raw = str(row.get(exp_date_col, '')).strip() if exp_date_col else ''
-                    try:
-                        exp_date = int(float(exp_date_raw)) if exp_date_raw else 0
-                    except (ValueError, TypeError):
-                        exp_date = 0
-                        
-                    close_box_col = mapping.get('close_box_counter')
-                    close_box_raw = str(row.get(close_box_col, '')).strip() if close_box_col else ''
-                    try:
-                        close_box_counter = int(float(close_box_raw)) if close_box_raw else 0
-                    except (ValueError, TypeError):
-                        close_box_counter = 0
-
-                    extra_data = {}
-                    if mapping.get('extra_data_map'):
-                        for attr_name, col_name in mapping.get('extra_data_map').items():
-                            if col_name:
-                                val = row.get(col_name)
-                                if val is not None and str(val).strip() != '' and str(val) != 'None':
-                                    extra_data[attr_name] = val
-
-                    defaults_dict = {
-                        'name': name,
-                        'exp_date': exp_date,
-                        'close_box_counter': close_box_counter,
-                        'extra_data': extra_data
-                    }
-
-                    static_values = mapping.get('staticValues', {})
-                    if static_values.get('portionContainerId'):
-                        defaults_dict['portion_container_id'] = static_values.get('portionContainerId')
-                    if static_values.get('boxContainerId'):
-                        defaults_dict['box_container_id'] = static_values.get('boxContainerId')
-                    if static_values.get('packLabelId'):
-                        defaults_dict['templates_pack_label_id'] = static_values.get('packLabelId')
-                    if static_values.get('boxLabelId'):
-                        defaults_dict['templates_box_label_id'] = static_values.get('boxLabelId')
-
-                    nom, created = Nomenclature.objects.update_or_create(
-                        article=article,
-                        defaults=defaults_dict
-                    )
-                    success_count += 1
-                except Exception as e:
-                    error_count += 1
-                    errors.append(f"Row {index+2}: {str(e)}")
-                    
-            return Response({
-                'success': True, 
-                'imported': success_count,
-                'errors': errors[:10],
-                'error_count': error_count
-            })
-            
+            with transaction.atomic():
+                if to_create:
+                    Nomenclature.objects.bulk_create(to_create, batch_size=500)
+                if to_update:
+                    Nomenclature.objects.bulk_update(to_update, list(upd_fields), batch_size=500)
         except Exception as e:
-             return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'success': True,
+            'imported': len(to_create) + len(to_update),
+            'created': len(to_create),
+            'updated': len(to_update),
+            'errors': errors[:10],
+            'error_count': len(errors),
+        })
 
 class PacksViewSet(viewsets.ModelViewSet):
     queryset = Pack.objects.all().order_by('-created')
