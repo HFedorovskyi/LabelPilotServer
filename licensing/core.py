@@ -245,21 +245,16 @@ def seat_limit() -> Optional[int]:
     return lic.max_stations if lic else None
 
 
-# DEMO mode: with NO license the product runs limited — at most DEMO_MAX_STATIONS
-# station(s) may register, so a real multi-station line must buy a license. The data key
-# stays lenient (legacy fallback) so demo data is never bricked — only seats are capped
-# (plus the UI banner + label watermark). Tune this constant to taste.
-DEMO_MAX_STATIONS = 1
-
-
 def seat_available(current_count: int) -> bool:
     """True if a NEW station may be registered.
-    No license  -> DEMO: capped at DEMO_MAX_STATIONS.
-    Present-but-invalid (bad signature / expired / wrong-machine) -> blocked.
-    Valid license -> its max_stations (None = unlimited)."""
+    NO license -> UNLIMITED. The commercial boundary without a license is the data-export
+    gate (the server won't push real station data without a license), NOT a station cap —
+    so a prospect can stand up as many stations as they like and test with the built-in demo.
+    A present-but-invalid (bad signature / expired / wrong-machine) license blocks new seats;
+    a valid license honors its max_stations (None = unlimited)."""
     st = license_state()
     if not st.present:
-        return current_count < DEMO_MAX_STATIONS   # demo cap (was: unlimited)
+        return True
     if not st.valid_for_key:      # present but bad signature
         return False
     if st.expired or not st.machine_ok:
@@ -274,7 +269,7 @@ def license_status() -> dict:
         return {
             "licensed": False, "mode": "demo", "edition": "demo",
             "customer": None, "expires": None, "expired": False,
-            "max_stations": DEMO_MAX_STATIONS, "demo_max_stations": DEMO_MAX_STATIONS,
+            "max_stations": None, "demo_max_stations": None,
             "license_id": None, "machine_id": machine_id(),
         }
     return {

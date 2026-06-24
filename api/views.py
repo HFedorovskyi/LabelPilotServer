@@ -395,17 +395,11 @@ class StationsViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        # Enforce the seat limit on API station creation (no license -> demo cap).
-        from licensing import seat_available, license_status
+        # Seat limit applies only to an over-cap or invalid license; no license = unlimited.
+        from licensing import seat_available
         from rest_framework.exceptions import ValidationError
         if not seat_available(LabelsStations.objects.count()):
-            st = license_status()
-            if not st.get("licensed"):
-                msg = (f"Демо-режим: без лицензии разрешено станций — {st.get('demo_max_stations', 1)}. "
-                       f"Активируйте лицензию, чтобы добавить больше.")
-            else:
-                msg = "Достигнут лимит станций по лицензии."
-            raise ValidationError({"license": msg})
+            raise ValidationError({"license": "Достигнут лимит станций по лицензии (или лицензия недействительна)."})
         serializer.save()
 
 
