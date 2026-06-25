@@ -275,6 +275,6 @@ def license_status() -> dict:
     return {
         "licensed": True, "mode": "licensed", "edition": lic.edition, "customer": lic.customer,
         "expires": lic.expires, "expired": lic.is_expired(),
-        "max_stations": lic.max_stations, "demo_max_stations": DEMO_MAX_STATIONS,
+        "max_stations": lic.max_stations, "demo_max_stations": None,
         "license_id": lic.license_id, "features": lic.features, "machine_id": machine_id(),
     }

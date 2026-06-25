@@ -235,5 +235,17 @@ MESSAGES = {
         "en": "Weight: the product has no fixed weight set, a test value is used.",
         "de": "Gewicht: für das Produkt ist kein Festgewicht festgelegt, es wird ein Testwert verwendet.",
         "uk": "Вага: у товару не задано фіксовану вагу, використовується тестове значення."
+    },
+    "license.importNoFile": {
+        "ru": "Файл лицензии не передан.",
+        "en": "No license file provided.",
+        "de": "Keine Lizenzdatei übergeben.",
+        "uk": "Файл ліцензії не передано."
+    },
+    "license.importInvalid": {
+        "ru": "Недействительная лицензия: подпись не прошла проверку.",
+        "en": "Invalid license: signature verification failed.",
+        "de": "Ungültige Lizenz: Signaturprüfung fehlgeschlagen.",
+        "uk": "Недійсна ліцензія: перевірку підпису не пройдено."
     }
 }

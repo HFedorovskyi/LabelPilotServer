@@ -387,6 +387,51 @@ class LicenseView(APIView):
         return Response(data)
 
 
+from api.permissions import IsAdmin as _IsAdmin
+
+
+class LicenseImportView(APIView):
+    """Admin-only: install/replace license.lpl from an uploaded file (or pasted token).
+    The Ed25519 signature is verified BEFORE writing, so only a vendor-signed license is
+    accepted. Picked up live — license_state() caches on the file's (mtime, size), so the
+    server flips out of demo on the next status read without a restart.
+    POST /api/v1/license/import/  (multipart 'file' OR JSON {token})."""
+    permission_classes = [_IsAdmin]
+
+    def post(self, request):
+        from licensing.core import _verify_and_parse, _license_path, license_status
+        from licensing import license_state
+
+        raw = None
+        f = request.FILES.get('file')
+        if f is not None:
+            try:
+                raw = f.read().decode('utf-8').strip()
+            except Exception:
+                raw = None
+        if not raw:
+            raw = (request.data.get('token') or '').strip()
+        if not raw:
+            return Response({'detail': tr('license.importNoFile')}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            _verify_and_parse(raw)  # raises on bad signature / malformed payload
+        except Exception:
+            return Response({'detail': tr('license.importInvalid')}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            _license_path().write_text(raw, encoding='utf-8')
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        data = dict(license_status())
+        st = license_state()
+        data['signature_valid'] = st.signature_valid
+        data['machine_ok'] = st.machine_ok
+        data['stations_used'] = LabelsStations.objects.count()
+        return Response(data)
+
+
 class StationsViewSet(viewsets.ModelViewSet):
     queryset = LabelsStations.objects.all()
     serializer_class = LabelsStationsSerializer

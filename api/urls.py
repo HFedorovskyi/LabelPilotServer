@@ -13,6 +13,7 @@ from api.views import (
     FullSyncView,
     VersionView,
     LicenseView,
+    LicenseImportView,
 )
 from api.statistics_views import StatisticsView
 from api.auth_views import (
@@ -47,5 +48,6 @@ urlpatterns = [
     path('full_sync/', FullSyncView.as_view(), name='full-sync'),
     path('version/', VersionView.as_view(), name='version'),
     path('license/', LicenseView.as_view(), name='license'),
+    path('license/import/', LicenseImportView.as_view(), name='license-import'),
     path('', include(router.urls)),
 ]
