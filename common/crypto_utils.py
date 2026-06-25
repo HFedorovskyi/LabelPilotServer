@@ -1,11 +1,14 @@
 import json
 import base64
 import hashlib
+import logging
 import os
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.backends import default_backend
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 # In a real production scenario, this key should be loaded from environment variables
 # or a secure vault. For this implementation, we will use a derived key from settings.SECRET_KEY
@@ -43,6 +46,9 @@ def _license_token():
         lic = load_license()
         return lic.token if lic is not None else None
     except Exception:
+        # Silently degrading to the legacy (non-LPI2) format hides a misconfigured license
+        # from the operator; at least leave a breadcrumb so support can spot it in the log.
+        logger.warning("encrypt_data: could not load license token; emitting legacy format", exc_info=True)
         return None
 
 

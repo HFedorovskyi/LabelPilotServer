@@ -83,15 +83,29 @@ def _license_path() -> Path:
     return Path(__file__).resolve().parent.parent / _LICENSE_FILENAME
 
 
+_MACHINE_ID_CACHE: Optional[str] = None
+
+
 def machine_id() -> str:
     """Stable per-machine fingerprint (Windows MachineGuid; falls back to MAC).
-    Shown to the customer so the vendor can issue a machine-bound license."""
+    Shown to the customer so the vendor can issue a machine-bound license.
+
+    The successful MachineGuid result is cached process-wide. If a later read transiently
+    fails (registry locked/AV), we return the cached value rather than the UNSTABLE
+    uuid.getnode() MAC fallback — getnode() may hand back a random locally-administered MAC
+    that differs between calls, which would flip a bound license's machine_ok on/off mid-run
+    (intermittently denying new exports/seats). Only a process that NEVER read the registry
+    successfully falls through to the MAC."""
+    global _MACHINE_ID_CACHE
     try:
         import winreg
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Cryptography") as k:
             guid, _ = winreg.QueryValueEx(k, "MachineGuid")
-            return hashlib.sha256(guid.encode()).hexdigest()[:32]
+            _MACHINE_ID_CACHE = hashlib.sha256(guid.encode()).hexdigest()[:32]
+            return _MACHINE_ID_CACHE
     except Exception:
+        if _MACHINE_ID_CACHE:
+            return _MACHINE_ID_CACHE
         import uuid
         return hashlib.sha256(str(uuid.getnode()).encode()).hexdigest()[:32]
 

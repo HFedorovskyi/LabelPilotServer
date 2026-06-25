@@ -538,8 +538,15 @@ class StationsViewSet(viewsets.ModelViewSet):
         target_port = station.station_port or 5556
         url = f'http://{station.station_ip}:{target_port}/api/full_sync'
 
+        # Encrypt the live push as LPI2 (the signed license token is embedded) so the station can
+        # AUTHENTICATE the sender — an unauthenticated plaintext push from a rogue LAN host is
+        # rejected. Matches the already-encrypted USB/download path (download_update).
+        from common.crypto_utils import encrypt_data
         try:
-            resp = requests.post(url, json=payload, timeout=5)
+            resp = requests.post(
+                url, data=encrypt_data(payload),
+                headers={'Content-Type': 'application/octet-stream'}, timeout=5,
+            )
             resp.raise_for_status()
             from django.utils import timezone as tz
             station.last_sync_at = tz.now()
@@ -818,8 +825,13 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         target_port = station.station_port or 5556
         url = f'http://{station.station_ip}:{target_port}/api/print_job'
 
+        # Encrypt the live push as LPI2 so the station can authenticate the sender (see sync_data).
+        from common.crypto_utils import encrypt_data
         try:
-            resp = requests.post(url, json=payload, timeout=5)
+            resp = requests.post(
+                url, data=encrypt_data(payload),
+                headers={'Content-Type': 'application/octet-stream'}, timeout=5,
+            )
             resp.raise_for_status()
             job.status = 'sent'
             job.save(update_fields=['status', 'updated_at'])
