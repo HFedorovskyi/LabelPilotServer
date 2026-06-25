@@ -569,6 +569,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         from django.utils.dateparse import parse_datetime
         from django.utils import timezone as tz
         from django.db import transaction
+        from django.core.exceptions import ValidationError as DjangoValidationError
 
         file_obj = request.FILES.get('file')
         if not file_obj:
@@ -579,7 +580,12 @@ class StationsViewSet(viewsets.ModelViewSet):
             return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
         station_uuid = data.get('station_uuid')
-        station = LabelsStations.objects.filter(station_uuid=station_uuid).first()
+        # station_uuid is a UUIDField; a malformed/non-UUID value raises ValidationError.
+        # Treat it like an unknown station (process unattached) rather than 500 the endpoint.
+        try:
+            station = LabelsStations.objects.filter(station_uuid=station_uuid).first() if station_uuid else None
+        except (ValueError, DjangoValidationError):
+            station = None
 
         labels_data = [it for it in (data.get('printed_labels') or []) if it.get('unique_id')]
         logs_data = data.get('logs') or []
