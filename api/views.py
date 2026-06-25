@@ -556,99 +556,95 @@ class StationsViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def upload_report(self, request):
-        """
-        Accepts an encrypted .lpr file from a station.
+        """Ingest an encrypted .lpr report from a station — same payload over either
+        transport: USB upload OR the station's automatic online push.
+
+        Built to absorb many stations (10-20) reporting on a 5-min cadence: FKs are
+        batch-resolved, rows are bulk_create'd with ignore_conflicts, and the whole
+        write is one transaction. Fully idempotent — PrintedLabel dedupes on unique_id
+        and StationLog on event_uid, so retries / USB-then-online never double-count.
         """
         from common.crypto_utils import decrypt_data
-        
+        from ProductionLogs.models import PrintedLabel, StationLog
+        from django.utils.dateparse import parse_datetime
+        from django.utils import timezone as tz
+        from django.db import transaction
+
         file_obj = request.FILES.get('file')
         if not file_obj:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
         try:
-            encrypted_data = file_obj.read()
-            data = decrypt_data(encrypted_data)
+            data = decrypt_data(file_obj.read())
         except Exception as e:
-             return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
-             
-        # Process report data
-        # For now, just log it and return success
-        # In future: Save to TransactionLog model
-        
-        station_uuid = data.get('station_uuid')
-        # report_type = data.get('type')
-        
-        from ProductionLogs.models import PrintedLabel, StationLog
-        from django.utils.dateparse import parse_datetime
-        
-        station = LabelsStations.objects.filter(station_uuid=station_uuid).first()
-        
-        # 1. Process Printed Labels
-        labels_data = data.get('printed_labels', [])
-        labels_count = 0
-        for item in labels_data:
-            unique_id = item.get('unique_id')
-            # Skip if already exists (idempotency)
-            if not unique_id or PrintedLabel.objects.filter(unique_id=unique_id).exists():
-                continue
-            
-            # Resolve FKs if possible
-            prod_id = item.get('product_id')
-            pack_id = item.get('pack_id')
-            
-            prod = Nomenclature.objects.filter(pk=prod_id).first() if prod_id else None
-            pack = Pack.objects.filter(pk=pack_id).first() if pack_id else None
-            
-            try:
-                PrintedLabel.objects.create(
-                    station=station,
-                    station_user_name=item.get('user_name', ''),
-                    product=prod,
-                    product_name_snapshot=item.get('product_name', '') or (prod.name if prod else ''),
-                    pack=pack,
-                    pack_name_snapshot=item.get('pack_name', '') or (pack.name if pack else ''),
-                    unique_id=unique_id,
-                    printed_at=parse_datetime(item.get('printed_at'))
-                )
-                labels_count += 1
-            except Exception as e:
-                print(f"Error saving label {unique_id}: {e}")
+            return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 2. Process Logs
-        logs_data = data.get('logs', [])
-        logs_count = 0
-        for item in logs_data:
-            try:
-                StationLog.objects.create(
+        station_uuid = data.get('station_uuid')
+        station = LabelsStations.objects.filter(station_uuid=station_uuid).first()
+
+        labels_data = [it for it in (data.get('printed_labels') or []) if it.get('unique_id')]
+        logs_data = data.get('logs') or []
+
+        new_labels, new_logs = [], []
+
+        # --- Printed labels: skip ids already stored, batch-resolve product/pack FKs ---
+        if labels_data:
+            uids = [it['unique_id'] for it in labels_data]
+            seen = set(PrintedLabel.objects.filter(unique_id__in=uids).values_list('unique_id', flat=True))
+            prods = Nomenclature.objects.in_bulk({it['product_id'] for it in labels_data if it.get('product_id')})
+            packs = Pack.objects.in_bulk({it['pack_id'] for it in labels_data if it.get('pack_id')})
+            for it in labels_data:
+                uid = it['unique_id']
+                if uid in seen:
+                    continue
+                seen.add(uid)  # also dedupes within this one payload
+                prod = prods.get(it.get('product_id'))
+                pack = packs.get(it.get('pack_id'))
+                new_labels.append(PrintedLabel(
                     station=station,
-                    level=item.get('level', 'INFO'),
-                    message=item.get('message', ''),
-                    timestamp=parse_datetime(item.get('timestamp'))
-                )
-                logs_count += 1
-            except Exception as e:
-                print(f"Error saving log: {e}")
-        
-        # 3. Update Station Status if provided
-        if station and 'status' in data:
-             # Example: could update last_seen, is_online (though report implies async)
-             pass 
-        
-        print(f"Report processed for {station_uuid}: {labels_count} labels, {logs_count} logs.")
-        if station:
-            from django.utils import timezone as tz
-            station.last_sync_at = tz.now()
-            station.save(update_fields=['last_sync_at', 'changed_at'])
+                    station_user_name=it.get('user_name', ''),
+                    product=prod,
+                    product_name_snapshot=it.get('product_name', '') or (prod.name if prod else ''),
+                    pack=pack,
+                    pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
+                    unique_id=uid,
+                    printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
+                ))
+
+        # --- Logs: skip event_uids already stored (legacy/USB logs without one are kept) ---
+        if logs_data:
+            euids = [it['event_uid'] for it in logs_data if it.get('event_uid')]
+            seen_l = set(StationLog.objects.filter(event_uid__in=euids).values_list('event_uid', flat=True)) if euids else set()
+            for it in logs_data:
+                euid = it.get('event_uid')
+                if euid and euid in seen_l:
+                    continue
+                if euid:
+                    seen_l.add(euid)
+                new_logs.append(StationLog(
+                    station=station,
+                    level=it.get('level', 'INFO'),
+                    message=it.get('message', ''),
+                    timestamp=parse_datetime(it.get('timestamp') or '') or tz.now(),
+                    event_uid=euid or None,
+                ))
+
+        with transaction.atomic():
+            if new_labels:
+                PrintedLabel.objects.bulk_create(new_labels, ignore_conflicts=True)
+            if new_logs:
+                StationLog.objects.bulk_create(new_logs, ignore_conflicts=True)
+            if station:
+                station.last_sync_at = tz.now()
+                station.save(update_fields=['last_sync_at', 'changed_at'])
+
+        labels_count, logs_count = len(new_labels), len(new_logs)
         station_label = station.station_name if station else station_uuid
-        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}» (USB): {labels_count} этикеток, {logs_count} логов')
-        
+        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {logs_count} логов')
+
         return Response({
-            'status': 'success', 
+            'status': 'success',
             'message': 'Report processed successfully',
-            'details': {
-                'labels_processed': labels_count,
-                'logs_processed': logs_count
-            }
+            'details': {'labels_processed': labels_count, 'logs_processed': logs_count},
         })
 
     @action(detail=False, methods=['get'])

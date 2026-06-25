@@ -38,7 +38,10 @@ class StationLog(models.Model):
     level = models.CharField(max_length=20, choices=LOG_LEVELS, default='INFO', verbose_name="Уровень")
     message = models.TextField(verbose_name="Сообщение")
     timestamp = models.DateTimeField(verbose_name="Время события")
-    
+    # Client-generated idempotency key so an online retry (or USB-then-online) of the same
+    # log row is skipped instead of duplicated. Nullable for legacy/USB reports without it.
+    event_uid = models.CharField(max_length=64, null=True, blank=True, unique=True, verbose_name="UID события")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Время получения сервером")
 
     def __str__(self):
