@@ -640,9 +640,11 @@ class StationsViewSet(viewsets.ModelViewSet):
             station = None
 
         labels_data = [it for it in (data.get('printed_labels') or []) if it.get('unique_id')]
+        deleted_data = [it for it in (data.get('deleted_labels') or []) if it.get('unique_id')]
         logs_data = data.get('logs') or []
 
         new_labels, new_logs = [], []
+        deleted_uids = [it['unique_id'] for it in deleted_data]
 
         # --- Printed labels: skip ids already stored, batch-resolve product/pack FKs ---
         if labels_data:
@@ -666,6 +668,7 @@ class StationsViewSet(viewsets.ModelViewSet):
                     pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
                     unique_id=uid,
                     printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
+                    weight_netto_grams=it.get('weight_netto_grams'),
                 ))
 
         # --- Logs: skip event_uids already stored (legacy/USB logs without one are kept) ---
@@ -686,23 +689,61 @@ class StationsViewSet(viewsets.ModelViewSet):
                     event_uid=euid or None,
                 ))
 
+        # --- Deleted weighings ("отвесы"): the station removed these packs from an open box.
+        # Insert any not-yet-stored ones as is_deleted=True; the transaction below ALSO flips
+        # every reported deleted uid to is_deleted=True, so a pack reported as good on an
+        # earlier delta and only later deleted is reconciled. Idempotent on replay.
+        if deleted_data:
+            seen_d = set(PrintedLabel.objects.filter(unique_id__in=deleted_uids).values_list('unique_id', flat=True))
+            dprods = Nomenclature.objects.in_bulk({it['product_id'] for it in deleted_data if it.get('product_id')})
+            dpacks = Pack.objects.in_bulk({it['pack_id'] for it in deleted_data if it.get('pack_id')})
+            for it in deleted_data:
+                uid = it['unique_id']
+                if uid in seen_d:
+                    continue
+                seen_d.add(uid)
+                prod = dprods.get(it.get('product_id'))
+                pack = dpacks.get(it.get('pack_id'))
+                new_labels.append(PrintedLabel(
+                    station=station,
+                    station_user_name=it.get('user_name', ''),
+                    product=prod,
+                    product_name_snapshot=it.get('product_name', '') or (prod.name if prod else ''),
+                    pack=pack,
+                    pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
+                    unique_id=uid,
+                    printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
+                    weight_netto_grams=it.get('weight_netto_grams'),
+                    is_deleted=True,
+                    deleted_at=parse_datetime(it.get('deleted_at') or '') or tz.now(),
+                ))
+
         with transaction.atomic():
             if new_labels:
                 PrintedLabel.objects.bulk_create(new_labels, ignore_conflicts=True)
             if new_logs:
                 StationLog.objects.bulk_create(new_logs, ignore_conflicts=True)
+            # Reconcile good -> deleted for packs already stored from an earlier delta (Case B),
+            # stamping each row's own deletion time so the dashboard buckets it on the right day.
+            # NOTE: deletion is TERMINAL — the client has no "undelete", so this only ever flips
+            # is_deleted False -> True; a row never goes back to good.
+            for it in deleted_data:
+                PrintedLabel.objects.filter(unique_id=it['unique_id']).update(
+                    is_deleted=True,
+                    deleted_at=parse_datetime(it.get('deleted_at') or '') or tz.now(),
+                )
             if station:
                 station.last_sync_at = tz.now()
                 station.save(update_fields=['last_sync_at', 'changed_at'])
 
-        labels_count, logs_count = len(new_labels), len(new_logs)
+        labels_count, logs_count, deleted_count = len(new_labels), len(new_logs), len(deleted_data)
         station_label = station.station_name if station else station_uuid
-        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {logs_count} логов')
+        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {deleted_count} отвесов, {logs_count} логов')
 
         return Response({
             'status': 'success',
             'message': 'Report processed successfully',
-            'details': {'labels_processed': labels_count, 'logs_processed': logs_count},
+            'details': {'labels_processed': labels_count, 'deleted_processed': deleted_count, 'logs_processed': logs_count},
         })
 
     @action(detail=False, methods=['get'])

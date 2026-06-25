@@ -2,8 +2,8 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.db.models import Count, Sum, F, FloatField, Q
-from django.db.models.functions import Coalesce, TruncHour, TruncDate
+from django.db.models import Count, Sum, F, FloatField, Q, Case, When
+from django.db.models.functions import Coalesce, TruncHour, TruncDate, NullIf
 from ProductionLogs.models import PrintedLabel, StationLog
 from label_stations.models import LabelsStations
 from print_jobs.models import PrintJob
@@ -21,36 +21,53 @@ class StatisticsView(APIView):
     def get(self, request):
         today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
 
-        # ── Old metrics (kept for backwards compat) ──────────────────────────
-        total_labels = PrintedLabel.objects.count()
-        labels_today = PrintedLabel.objects.filter(printed_at__gte=today).count()
+        # Good production = non-deleted weighings. Deleted "отвесы" are surfaced separately below.
+        good = PrintedLabel.objects.filter(is_deleted=False)
 
-        total_weight_agg = PrintedLabel.objects.filter(
-            product__is_fixed_weight=True
-        ).aggregate(
-            total_weight=Coalesce(Sum(F('product__fixed_weight_grams'), output_field=FloatField()), 0.0)
-        )
-        total_weight_kg = round(total_weight_agg['total_weight'] / 1000.0, 2)
+        total_labels = good.count()
+        labels_today = good.filter(printed_at__gte=today).count()
 
-        today_weight_agg = PrintedLabel.objects.filter(
-            printed_at__gte=today,
-            product__is_fixed_weight=True
-        ).aggregate(
-            today_weight=Coalesce(Sum(F('product__fixed_weight_grams'), output_field=FloatField()), 0.0)
+        # Weight rule: a FIXED-weight product contributes its nominal Nomenclature.fixed_weight_grams;
+        # a VARIABLE-weight product contributes the station-reported actual net weight. A fixed product
+        # mis-configured with 0/NULL nominal falls back to the actual weighed value (NullIf) so a real
+        # weighing is never silently counted as 0. Legacy rows with no weight count as 0 (outer Coalesce).
+        weight_expr = Coalesce(
+            Case(
+                When(product__is_fixed_weight=True,
+                     then=Coalesce(NullIf(F('product__fixed_weight_grams'), 0.0), F('weight_netto_grams'))),
+                default=F('weight_netto_grams'),
+                output_field=FloatField(),
+            ),
+            0.0,
+            output_field=FloatField(),
         )
-        weight_today_kg = round(today_weight_agg['today_weight'] / 1000.0, 2)
+        total_weight_kg = round(good.aggregate(w=Coalesce(Sum(weight_expr), 0.0))['w'] / 1000.0, 2)
+        weight_today_kg = round(
+            good.filter(printed_at__gte=today).aggregate(w=Coalesce(Sum(weight_expr), 0.0))['w'] / 1000.0, 2
+        )
+
+        # ── Deleted weighings ("удалённые отвесы") — count + weight, today & total ──────
+        # Bucket "today" by the DELETION time (deleted_at), not production time, so a pack printed
+        # yesterday but deleted today counts today. Rare rows with no deleted_at fall back to printed_at.
+        # Weight uses the SAME rule as good production (weight_expr) so the two totals are comparable.
+        deleted_qs = PrintedLabel.objects.filter(is_deleted=True)
+        deleted_today_qs = deleted_qs.annotate(_dt=Coalesce('deleted_at', 'printed_at')).filter(_dt__gte=today)
+        deleted_total = deleted_qs.count()
+        deleted_today = deleted_today_qs.count()
+        deleted_weight_total_kg = round(deleted_qs.aggregate(w=Coalesce(Sum(weight_expr), 0.0))['w'] / 1000.0, 2)
+        deleted_weight_today_kg = round(deleted_today_qs.aggregate(w=Coalesce(Sum(weight_expr), 0.0))['w'] / 1000.0, 2)
 
         # ── Throughput over time + yesterday delta (dashboard charts) ────────
         now = timezone.now()
         yesterday = today - datetime.timedelta(days=1)
-        labels_yesterday = PrintedLabel.objects.filter(
+        labels_yesterday = good.filter(
             printed_at__gte=yesterday, printed_at__lt=today
         ).count()
 
         start_24h = (now - datetime.timedelta(hours=23)).replace(minute=0, second=0, microsecond=0)
         hourly_map = {
             row['bucket']: row['c']
-            for row in PrintedLabel.objects.filter(printed_at__gte=start_24h)
+            for row in good.filter(printed_at__gte=start_24h)
             .annotate(bucket=TruncHour('printed_at')).values('bucket').annotate(c=Count('id'))
         }
         throughput_24h = [
@@ -64,7 +81,7 @@ class StatisticsView(APIView):
         start_7d = (now - datetime.timedelta(days=6)).replace(hour=0, minute=0, second=0, microsecond=0)
         daily_map = {
             row['bucket']: row['c']
-            for row in PrintedLabel.objects.filter(printed_at__gte=start_7d)
+            for row in good.filter(printed_at__gte=start_7d)
             .annotate(bucket=TruncDate('printed_at')).values('bucket').annotate(c=Count('id'))
         }
         throughput_7d = [
@@ -76,7 +93,7 @@ class StatisticsView(APIView):
         ]
 
         # Top stations
-        top_stations_qs = PrintedLabel.objects.values(
+        top_stations_qs = good.values(
             'station__station_name', 'station__station_number'
         ).annotate(count=Count('id')).order_by('-count')[:5]
         top_stations = [
@@ -89,7 +106,7 @@ class StatisticsView(APIView):
         ]
 
         # Top products
-        top_products_qs = PrintedLabel.objects.values(
+        top_products_qs = good.values(
             'product_name_snapshot'
         ).annotate(count=Count('id')).order_by('-count')[:5]
         top_products = [
@@ -167,7 +184,7 @@ class StatisticsView(APIView):
         # ── NEW: Stations Detail (with mode) ────────────────────────────────
         stations_detail = []
         for s in LabelsStations.objects.all().order_by('station_number'):
-            labels_count = PrintedLabel.objects.filter(station=s).count()
+            labels_count = good.filter(station=s).count()
             stations_detail.append({
                 "id": s.pk,
                 "name": s.station_name,
@@ -198,6 +215,10 @@ class StatisticsView(APIView):
             "labels_today": labels_today,
             "total_weight_kg": total_weight_kg,
             "weight_today_kg": weight_today_kg,
+            "deleted_today": deleted_today,
+            "deleted_total": deleted_total,
+            "deleted_weight_today_kg": deleted_weight_today_kg,
+            "deleted_weight_total_kg": deleted_weight_total_kg,
             "labels_yesterday": labels_yesterday,
             "throughput_24h": throughput_24h,
             "throughput_7d": throughput_7d,

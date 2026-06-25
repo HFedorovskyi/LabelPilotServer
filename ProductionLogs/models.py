@@ -15,7 +15,18 @@ class PrintedLabel(models.Model):
     
     unique_id = models.CharField(max_length=100, unique=True, verbose_name="Уникальный ID этикетки")
     printed_at = models.DateTimeField(verbose_name="Время печати")
-    
+
+    # Actual weighed net weight (grams) reported by the station. Used for VARIABLE-weight
+    # products in the dashboard total (fixed-weight products use Nomenclature.fixed_weight_grams).
+    # Nullable: legacy rows reported before this field existed have None.
+    weight_netto_grams = models.FloatField(null=True, blank=True, verbose_name="Фактический вес нетто (г)")
+    # A deleted weighing ("отвес"): the operator removed this pack from an open box. Excluded
+    # from good-production counts/weight; surfaced separately on the dashboard.
+    is_deleted = models.BooleanField(default=False, db_index=True, verbose_name="Отвес удалён")
+    # When the station deleted it (NOT printed_at). The dashboard buckets "deleted today" by this,
+    # so a pack printed yesterday but deleted today counts on the correct day. Null until deleted.
+    deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Время удаления отвеса")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Время получения сервером")
 
     def __str__(self):
