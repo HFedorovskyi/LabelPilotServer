@@ -122,21 +122,28 @@ class Command(BaseCommand):
         name = msg.get('name', f"Station {ip}")
         port = msg.get('port', 5000)
         
-        station = None
-
+        # station_uuid is a UUIDField. An announcement may carry a NON-UUID id — e.g. a
+        # client in built-in demo mode broadcasts 'demo-0000-...'. Using it in a query (or
+        # create) raises ValidationError, which previously crashed this handler BEFORE the
+        # IP fallback and spammed the log every 3s. Treat any non-UUID id as "no id": match
+        # the station by IP instead (so the real station still goes online), and mint a
+        # fresh uuid if we must create.
+        valid_uuid = False
         if station_id:
             try:
-                station = LabelsStations.objects.get(station_uuid=station_id)
-            except LabelsStations.DoesNotExist:
-                pass
-        
+                uuid.UUID(str(station_id))
+                valid_uuid = True
+            except (ValueError, AttributeError, TypeError):
+                valid_uuid = False
+
+        station = None
+        if valid_uuid:
+            station = LabelsStations.objects.filter(station_uuid=station_id).first()
         if not station:
-            # Fallback to IP search
+            # Fallback to IP search (also how a non-UUID/demo announce is reconciled).
             station = LabelsStations.objects.filter(station_ip=ip).first()
 
         if station:
-            # Update existing
-            # ... (omitted similar logic)
             station.station_ip = ip
             station.station_name = name
             station.station_port = port
@@ -148,9 +155,7 @@ class Command(BaseCommand):
             if not seat_available(LabelsStations.objects.count()):
                 print(f"[LICENSE] Seat limit reached - not registering new station from {ip} ({name}).")
                 return
-            generated_uuid = station_id if station_id else uuid.uuid4()
-            print(f"[DEBUG] Creating new station. IP={ip}, Name={name}, Port={port}, UUID={generated_uuid} (Type: {type(generated_uuid)})")
-            
+            generated_uuid = station_id if valid_uuid else uuid.uuid4()
             try:
                 LabelsStations.objects.create(
                     station_ip=ip,
@@ -159,17 +164,7 @@ class Command(BaseCommand):
                     station_uuid=generated_uuid,
                     is_online=True
                 )
-                print(f"[DEBUG] Successfully created station with UUID {generated_uuid}")
             except Exception as e:
-                print(f"[ERROR] Failed to create station with UUID {generated_uuid}: {e}")
-                # Try creating explicitly with save() to debug
-                s = LabelsStations(
-                    station_ip=ip,
-                    station_name=name,
-                    station_port=port,
-                    station_uuid=generated_uuid,
-                    is_online=True
-                )
-                s.save()
+                print(f"[ERROR] Failed to register station from {ip} ({name}): {e}")
 
 
