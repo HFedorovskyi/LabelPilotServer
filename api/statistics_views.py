@@ -2,7 +2,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django.utils import timezone
-from django.db.models import Count, Sum, F, FloatField, Q, Case, When
+from django.db.models import Count, Sum, F, FloatField, Q, Case, When, Min, Max
 from django.db.models.functions import Coalesce, TruncHour, TruncDate, NullIf
 from ProductionLogs.models import PrintedLabel, StationLog
 from label_stations.models import LabelsStations
@@ -182,9 +182,22 @@ class StatisticsView(APIView):
         ]
 
         # ── NEW: Stations Detail (with mode) ────────────────────────────────
+        # Per-station aggregates in ONE grouped query: marked/deleted counts, good + deleted
+        # weight (kg), and the activity span (first/last marking) — feeds the per-station modal.
+        agg_by_station = {}
+        for row in PrintedLabel.objects.values('station').annotate(
+            marked=Count('id', filter=Q(is_deleted=False)),
+            deleted=Count('id', filter=Q(is_deleted=True)),
+            weight_g=Coalesce(Sum(weight_expr, filter=Q(is_deleted=False)), 0.0),
+            deleted_weight_g=Coalesce(Sum(weight_expr, filter=Q(is_deleted=True)), 0.0),
+            first_at=Min('printed_at'),
+            last_at=Max('printed_at'),
+        ):
+            agg_by_station[row['station']] = row
+
         stations_detail = []
         for s in LabelsStations.objects.all().order_by('station_number'):
-            labels_count = good.filter(station=s).count()
+            a = agg_by_station.get(s.pk) or {}
             stations_detail.append({
                 "id": s.pk,
                 "name": s.station_name,
@@ -193,7 +206,13 @@ class StatisticsView(APIView):
                 "is_online": s.is_online,
                 "mode": s.mode,
                 "last_sync_at": s.last_sync_at.isoformat() if s.last_sync_at else None,
-                "labels_count": labels_count,
+                "labels_count": a.get('marked', 0),
+                "marked": a.get('marked', 0),
+                "deleted": a.get('deleted', 0),
+                "weight_kg": round((a.get('weight_g') or 0.0) / 1000.0, 2),
+                "deleted_weight_kg": round((a.get('deleted_weight_g') or 0.0) / 1000.0, 2),
+                "first_at": a['first_at'].isoformat() if a.get('first_at') else None,
+                "last_at": a['last_at'].isoformat() if a.get('last_at') else None,
             })
 
         # ── NEW: Server Events ───────────────────────────────────────────────
