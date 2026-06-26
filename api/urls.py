@@ -15,7 +15,7 @@ from api.views import (
     LicenseView,
     LicenseImportView,
 )
-from api.statistics_views import StatisticsView
+from api.statistics_views import StatisticsView, StationLabelsView
 from api.auth_views import (
     CsrfView, LoginView, LogoutView, MeView, BootstrapStatusView, BootstrapView,
 )
@@ -45,6 +45,7 @@ urlpatterns = [
     path('auth/bootstrap-status/', BootstrapStatusView.as_view(), name='auth-bootstrap-status'),
     path('auth/bootstrap/', BootstrapView.as_view(), name='auth-bootstrap'),
     path('statistics/', StatisticsView.as_view(), name='statistics'),
+    path('statistics/station_labels/', StationLabelsView.as_view(), name='station-labels'),
     path('full_sync/', FullSyncView.as_view(), name='full-sync'),
     path('version/', VersionView.as_view(), name='version'),
     path('license/', LicenseView.as_view(), name='license'),

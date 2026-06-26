@@ -252,3 +252,61 @@ class StatisticsView(APIView):
             "stations_detail": stations_detail,
             "server_events": server_events,
         })
+
+
+class StationLabelsView(APIView):
+    """Per-station marking detail — each printed/deleted label (pack) with time, operator,
+    product, weight and deletion state. Powers the dashboard's per-station drill-down for full
+    traceability. Paginated (limit/offset, newest first) and scopeable (today | all)."""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        station_id = request.query_params.get('station_id')
+        scope = request.query_params.get('scope', 'all')
+        try:
+            limit = min(max(int(request.query_params.get('limit', 300)), 1), 1000)
+        except (TypeError, ValueError):
+            limit = 300
+        try:
+            offset = max(int(request.query_params.get('offset', 0)), 0)
+        except (TypeError, ValueError):
+            offset = 0
+
+        qs = PrintedLabel.objects.all()
+        station = None
+        if station_id:
+            try:
+                station = LabelsStations.objects.filter(pk=int(station_id)).first()
+            except (TypeError, ValueError):
+                station = None
+            qs = qs.filter(station_id=station_id)
+
+        if scope == 'today':
+            today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            # Bucket by effective activity time: deletion time for deleted rows, else print time.
+            qs = qs.annotate(_dt=Coalesce('deleted_at', 'printed_at')).filter(_dt__gte=today)
+
+        total = qs.count()
+        rows = qs.order_by('-printed_at', '-id')[offset:offset + limit]
+        labels = [{
+            "id": r.id,
+            "pack_name": r.pack_name_snapshot,
+            "product_name": r.product_name_snapshot,
+            "operator": r.station_user_name,
+            "printed_at": r.printed_at.isoformat() if r.printed_at else None,
+            "weight_kg": round((r.weight_netto_grams or 0.0) / 1000.0, 3),
+            "is_deleted": r.is_deleted,
+            "deleted_at": r.deleted_at.isoformat() if r.deleted_at else None,
+        } for r in rows]
+
+        return Response({
+            "station": ({
+                "id": station.pk,
+                "name": station.station_name,
+                "number": station.station_number,
+            } if station else None),
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "labels": labels,
+        })
