@@ -263,6 +263,7 @@ class StationLabelsView(APIView):
     def get(self, request):
         station_id = request.query_params.get('station_id')
         scope = request.query_params.get('scope', 'all')
+        date_str = request.query_params.get('date')
         try:
             limit = min(max(int(request.query_params.get('limit', 300)), 1), 1000)
         except (TypeError, ValueError):
@@ -281,9 +282,19 @@ class StationLabelsView(APIView):
                 station = None
             qs = qs.filter(station_id=station_id)
 
-        if scope == 'today':
+        # Day filters bucket by EFFECTIVE activity time (deletion time for deleted rows, else print
+        # time), so a pack marked yesterday but deleted today lands on the day it was deleted.
+        if date_str:
+            from django.utils.dateparse import parse_date
+            d = parse_date(date_str)
+            if d:
+                start = timezone.now().replace(
+                    year=d.year, month=d.month, day=d.day, hour=0, minute=0, second=0, microsecond=0
+                )
+                end = start + datetime.timedelta(days=1)
+                qs = qs.annotate(_dt=Coalesce('deleted_at', 'printed_at')).filter(_dt__gte=start, _dt__lt=end)
+        elif scope == 'today':
             today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            # Bucket by effective activity time: deletion time for deleted rows, else print time.
             qs = qs.annotate(_dt=Coalesce('deleted_at', 'printed_at')).filter(_dt__gte=today)
 
         total = qs.count()
