@@ -646,6 +646,17 @@ class StationsViewSet(viewsets.ModelViewSet):
         new_labels, new_logs = [], []
         deleted_uids = [it['unique_id'] for it in deleted_data]
 
+        def _audit(it):
+            # Per-pack traceability passport (same for the good + deleted insert paths).
+            return {
+                'weight_netto_grams': it.get('weight_netto_grams'),
+                'weight_brutto_grams': it.get('weight_brutto_grams'),
+                'batch': it.get('batch') or '',
+                'production_date': it.get('production_date') or '',
+                'expiration_date': it.get('expiration_date') or '',
+                'barcode': it.get('barcode') or '',
+            }
+
         # --- Printed labels: skip ids already stored, batch-resolve product/pack FKs ---
         if labels_data:
             uids = [it['unique_id'] for it in labels_data]
@@ -668,7 +679,7 @@ class StationsViewSet(viewsets.ModelViewSet):
                     pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
                     unique_id=uid,
                     printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
-                    weight_netto_grams=it.get('weight_netto_grams'),
+                    **_audit(it),
                 ))
 
         # --- Logs: skip event_uids already stored (legacy/USB logs without one are kept) ---
@@ -713,7 +724,7 @@ class StationsViewSet(viewsets.ModelViewSet):
                     pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
                     unique_id=uid,
                     printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
-                    weight_netto_grams=it.get('weight_netto_grams'),
+                    **_audit(it),
                     is_deleted=True,
                     deleted_at=parse_datetime(it.get('deleted_at') or '') or tz.now(),
                 ))

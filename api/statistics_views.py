@@ -298,14 +298,29 @@ class StationLabelsView(APIView):
             qs = qs.annotate(_dt=Coalesce('deleted_at', 'printed_at')).filter(_dt__gte=today)
 
         total = qs.count()
-        rows = qs.order_by('-printed_at', '-id')[offset:offset + limit]
+        rows = qs.select_related('product').order_by('-printed_at', '-id')[offset:offset + limit]
+
+        def _weight_g(r):
+            # Mirror the dashboard rule: a fixed-weight product shows its nominal grams (so a fixed
+            # pack never reads "—" even on legacy rows); a variable product shows the reported actual.
+            p = r.product
+            if p is not None and getattr(p, 'is_fixed_weight', False) and (p.fixed_weight_grams or 0) > 0:
+                return p.fixed_weight_grams
+            return r.weight_netto_grams or 0.0
+
         labels = [{
             "id": r.id,
             "pack_name": r.pack_name_snapshot,
             "product_name": r.product_name_snapshot,
             "operator": r.station_user_name,
             "printed_at": r.printed_at.isoformat() if r.printed_at else None,
-            "weight_kg": round((r.weight_netto_grams or 0.0) / 1000.0, 3),
+            "weight_kg": round(_weight_g(r) / 1000.0, 3),
+            "weight_brutto_kg": (round((r.weight_brutto_grams or 0.0) / 1000.0, 3) or None),
+            "batch": r.batch,
+            "production_date": r.production_date,
+            "expiration_date": r.expiration_date,
+            "barcode": r.barcode,
+            "unique_id": r.unique_id,
             "is_deleted": r.is_deleted,
             "deleted_at": r.deleted_at.isoformat() if r.deleted_at else None,
         } for r in rows]

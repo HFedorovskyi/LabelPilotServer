@@ -27,6 +27,14 @@ class PrintedLabel(models.Model):
     # so a pack printed yesterday but deleted today counts on the correct day. Null until deleted.
     deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Время удаления отвеса")
 
+    # Audit / traceability passport fields, reported by the station per pack. Stored as the station
+    # holds them (strings); blank/None for legacy rows reported before these fields existed.
+    weight_brutto_grams = models.FloatField(null=True, blank=True, verbose_name="Вес брутто (г)")
+    batch = models.CharField(max_length=100, blank=True, default='', verbose_name="Партия")
+    production_date = models.CharField(max_length=32, blank=True, default='', verbose_name="Дата производства")
+    expiration_date = models.CharField(max_length=32, blank=True, default='', verbose_name="Срок годности")
+    barcode = models.CharField(max_length=128, blank=True, default='', verbose_name="Штрихкод/код маркировки")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Время получения сервером")
 
     def __str__(self):
