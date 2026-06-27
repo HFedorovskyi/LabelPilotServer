@@ -220,7 +220,9 @@ VERSION = _read_version_file()
 # Bumped to 1.3.12 with the production license-key rotation (server v1.1.23): an old-key client
 # (< 1.3.12) can't decrypt this new-key server's LPI2 push, so flag it incompatible -> forces update.
 MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.3.12')
-LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.3.12')
+# 1.3.13 only hardens the client's update backup (no protocol change), so it's advertised as the
+# latest but MIN stays 1.3.12 — stations are NOT forced to upgrade for a backup-only improvement.
+LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.3.13')
 
 
 
