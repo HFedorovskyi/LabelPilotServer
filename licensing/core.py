@@ -28,9 +28,9 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-# Ed25519 public key (hex of the 32-byte raw key). This is the DEV key — regenerate
-# for production with:  python make_license.py genkey  and paste the printed public key here.
-LICENSE_PUBLIC_KEY_HEX = "4df148b80088269eb55d2b1fccc75b18a9e52f57f324c8f5971b7267ab46f8fe"
+# Ed25519 public key (hex of the 32-byte raw key). Production key (2026) — must match the desktop
+# client (encryption.ts LICENSE_PUBLIC_KEY_HEX) and the LABELPILOT_LICENSE_PUBLIC_KEY used to sign.
+LICENSE_PUBLIC_KEY_HEX = "bd770682b1bef5aa9c081320dad25e7e1c81752e357bdeb36d9016b4afe45e56"
 
 _LICENSE_FILENAME = "license.lpl"
 
