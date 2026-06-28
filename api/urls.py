@@ -1,8 +1,9 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from api.views import (
-    NomenclatureViewSet, 
-    PacksViewSet, 
+    NomenclatureViewSet,
+    NomenclatureFolderViewSet,
+    PacksViewSet,
     LabelTemplatesViewSet, 
     BarcodeTemplatesViewSet, 
     StationsViewSet,
@@ -26,6 +27,7 @@ from api.operator_views import OperatorViewSet
 
 router = DefaultRouter()
 router.register(r'nomenclature', NomenclatureViewSet)
+router.register(r'nomenclature_folders', NomenclatureFolderViewSet)
 router.register(r'packs', PacksViewSet)
 router.register(r'labels', LabelTemplatesViewSet)
 router.register(r'barcodes', BarcodeTemplatesViewSet)

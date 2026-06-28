@@ -12,11 +12,12 @@ from api.serializers import (
     LabelsStationsSerializer,
     ProductPackLinkSerializer,
     GlobalProductAttributeSerializer,
+    NomenclatureFolderSerializer,
     PrintJobSerializer,
     PalletSerializer,
 )
 
-from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute
+from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute, NomenclatureFolder
 from print_jobs.models import PrintJob
 
 from Packs.models import Pack
@@ -60,6 +61,12 @@ class ProductPackLinkViewSet(viewsets.ModelViewSet):
 class GlobalProductAttributeViewSet(viewsets.ModelViewSet):
     queryset = GlobalProductAttribute.objects.all().order_by('-created')
     serializer_class = GlobalProductAttributeSerializer
+
+
+class NomenclatureFolderViewSet(viewsets.ModelViewSet):
+    """CRUD for nomenclature folders (server-side catalog organization)."""
+    queryset = NomenclatureFolder.objects.all().order_by('order', 'name')
+    serializer_class = NomenclatureFolderSerializer
 
 
 def _read_import_df(file_obj, sep_param, nrows=None):

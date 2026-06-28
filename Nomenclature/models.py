@@ -2,6 +2,23 @@ from django.db import models
 from Packs.models import Pack
 from LabelTemplates.models import LabelTemplates
 
+
+class NomenclatureFolder(models.Model):
+    """Server-side organizational folder for grouping nomenclature in the catalog UI.
+    Purely an admin convenience — NOT synced to stations (operators search by name)."""
+    name = models.CharField(max_length=255, verbose_name="Название папки")
+    order = models.IntegerField(default=0, verbose_name="Порядок")
+    created = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
+
+    def __str__(self):
+        return self.name
+
+    class Meta:
+        verbose_name = "Папка номенклатуры"
+        verbose_name_plural = "Папки номенклатуры"
+        ordering = ['order', 'name']
+
+
 class Nomenclature(models.Model):
     name = models.CharField(max_length=255, verbose_name="Название номенклатуры")
     article = models.CharField(max_length=100, verbose_name="Артикул", unique=True)
@@ -65,6 +82,14 @@ class Nomenclature(models.Model):
     created = models.DateTimeField(auto_now_add=True, verbose_name="Дата создания")
     edited = models.DateTimeField(auto_now=True, verbose_name="Дата изменения")
     order = models.IntegerField(default=0, verbose_name="Порядок сортировки")
+    folder = models.ForeignKey(
+        NomenclatureFolder,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='items',
+        verbose_name="Папка",
+    )
 
     def __str__(self):
         return f"{self.article} - {self.name}"

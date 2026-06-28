@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute
+from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute, NomenclatureFolder
 
 
 # ... (rest of imports)
@@ -176,6 +176,17 @@ class ProductPackLinkSerializer(serializers.ModelSerializer):
     class Meta:
         model = ProductPackLink
         fields = '__all__'
+
+class NomenclatureFolderSerializer(serializers.ModelSerializer):
+    item_count = serializers.SerializerMethodField()
+
+    class Meta:
+        model = NomenclatureFolder
+        fields = ['id', 'name', 'order', 'item_count']
+
+    def get_item_count(self, obj):
+        return obj.items.count()
+
 
 class GlobalProductAttributeSerializer(serializers.ModelSerializer):
     class Meta:
