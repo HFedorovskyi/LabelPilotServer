@@ -27,5 +27,11 @@ class ApiConfig(AppConfig):
                 from licensing.integrity import integrity_ok
                 if not integrity_ok():
                     log.warning('licensing integrity check failed (lenient mode — export still gated)')
+            # Optional phone-home (machine_id + license flags). Never blocks boot; offline = no-op.
+            try:
+                from licensing.telemetry import schedule_install_report
+                schedule_install_report(delay_sec=12.0)
+            except Exception:
+                pass
         except Exception:
             pass
