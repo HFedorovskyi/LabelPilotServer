@@ -19,3 +19,6 @@ backend/licensing/vendor_private*
 # Build / runtime artifacts
 celerybeat-schedule
 frontend_dist/
+
+.telemetry_last
+
