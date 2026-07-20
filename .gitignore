@@ -9,3 +9,16 @@ env/
 media/
 staticfiles/
 *.log
+
+# Secrets / license — NEVER commit (this repo is PUBLIC)
+*.key
+*.lpl
+license.lpl
+backend/licensing/vendor_private*
+
+# Build / runtime artifacts
+celerybeat-schedule
+frontend_dist/
+
+.telemetry_last
+

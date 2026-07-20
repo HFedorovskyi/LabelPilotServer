@@ -9,7 +9,6 @@ https://docs.djangoproject.com/en/5.1/topics/settings/
 For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.1/ref/settings/
 """
-from celery.schedules import crontab
 from pathlib import Path
 import os
 
@@ -20,24 +19,58 @@ import os
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def _load_dotenv(path):
+    """Minimal KEY=VALUE loader for <backend>/.env (the native installer writes it).
+    No third-party dependency; existing env vars win (Docker/dev override). No-op if absent."""
+    try:
+        for raw in path.read_text(encoding="utf-8-sig").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
+    except FileNotFoundError:
+        pass
+
+_load_dotenv(BASE_DIR / ".env")
+
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-$dvt5e#6-s3$-#7o-veoyuwl5%p3m3q52sd8)lk50p*mogmbbz'
+# The native installer generates a real key into backend/.env; the insecure default
+# stays only as a dev/Docker fallback.
+SECRET_KEY = os.getenv(
+    'DJANGO_SECRET_KEY',
+    'django-insecure-$dvt5e#6-s3$-#7o-veoyuwl5%p3m3q52sd8)lk50p*mogmbbz',
+)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv('DJANGO_DEBUG', 'True').strip().lower() in ('1', 'true', 'yes', 'on')
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',')
+# Strict licensing. When True (production), a present-but-tampered license fails CLOSED
+# (get_key raises instead of silently using the legacy key). Default False keeps
+# pre-licensing / dev installs lenient. Read AFTER _load_dotenv so the installer's .env
+# value is honored. In DEBUG this is downgraded to a warning so dev/CI never bricks.
+LICENSE_REQUIRED = os.getenv('LICENSE_REQUIRED', 'False').strip().lower() in ('1', 'true', 'yes', 'on')
 
-ALLOWED_HOSTS += os.getenv("EXTRA_ALLOWED_HOSTS", "").split(",")
+ALLOWED_HOSTS = [h for h in os.getenv('ALLOWED_HOSTS', '').split(',') if h]
+ALLOWED_HOSTS += [h for h in os.getenv('EXTRA_ALLOWED_HOSTS', '').split(',') if h]
+if not ALLOWED_HOSTS:
+    # LAN appliance: allow any host in production, localhost in dev.
+    ALLOWED_HOSTS = ['*'] if not DEBUG else ['localhost', '127.0.0.1']
 # Application definition
 
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    # Dev SPA (Next.js) on :3000 talking to API on :8000 with credentials/cookies.
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
 ]
+# LAN access over plain HTTP needs the server's own origin(s) trusted for admin POSTs.
+CSRF_TRUSTED_ORIGINS += [o for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o]
 
 INSTALLED_APPS = [
     'django.contrib.admin',
@@ -51,20 +84,25 @@ INSTALLED_APPS = [
     'Nomenclature.apps.NomenclatureConfig',
     'BarcodeTemplates.apps.BarcodeTemplatesConfig',
     'Packs.apps.PacksConfig',
+    'Pallets.apps.PalletsConfig',
     'rest_framework',
     'corsheaders',
     'drf_spectacular',
     'api.apps.ApiConfig',
     'ProductionLogs.apps.ProductionlogsConfig',
+    'print_jobs.apps.PrintJobsConfig',
+    'server_activity.apps.ServerActivityConfig',
 ]
 
 MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'api.i18n.LangMiddleware',  # set per-request language (X-Lang header) for tr() messages
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -145,6 +183,25 @@ STATICFILES_DIRS = [
 
 
 STATIC_ROOT = os.path.join(BASE_DIR, 'staticfiles')
+
+# WhiteNoise — Django serves its own static files (replaces the nginx container)
+STORAGES = {
+    "default": {"BACKEND": "django.core.files.storage.FileSystemStorage"},
+    "staticfiles": {"BACKEND": "whitenoise.storage.CompressedStaticFilesStorage"},
+}
+
+# Media (uploaded files) — served by Django (see urls.py)
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+
+# Serve the built frontend SPA (Next.js static export, `frontend/out`) from this
+# Django process — so one Waitress process serves API + admin + static + the UI
+# (no Node, no nginx, no Redis at runtime). Set via FRONTEND_DIST env / bundle path.
+FRONTEND_DIST = os.getenv('FRONTEND_DIST', os.path.join(BASE_DIR, 'frontend_dist'))
+if os.path.isdir(FRONTEND_DIST):
+    WHITENOISE_ROOT = FRONTEND_DIST
+    WHITENOISE_INDEX_FILE = True
+
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.1/ref/settings/#default-auto-field
 
@@ -163,40 +220,62 @@ def _read_version_file() -> str:
     return os.getenv('SERVER_VERSION', '1.0.0')
 
 VERSION = _read_version_file()
-MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.1.11')
-LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.1.11')
+# Bumped to 1.3.12 with the production license-key rotation (server v1.1.23): an old-key client
+# (< 1.3.12) can't decrypt this new-key server's LPI2 push, so flag it incompatible -> forces update.
+MIN_CLIENT_VERSION = os.getenv('MIN_CLIENT_VERSION', '1.3.12')
+# 1.3.13 only hardens the client's update backup (no protocol change), so it's advertised as the
+# latest but MIN stays 1.3.12 — stations are NOT forced to upgrade for a backup-only improvement.
+LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.3.13')
 
 
 
 
 
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://:1234@redis:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://:1234@redis:6379/0')
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'
-CELERY_BROKER_CONNECTION_RETRY_ON_STARTUP = True
-
-
-CELERY_BEAT_SCHEDULE = {
-    'update-client-status-every-5-minutes': {
-        'task': 'label_stations.tasks.update_client_status',
-        'schedule': crontab(minute='*/5'),  # Каждые 5 минут
-    },
-}
+# Celery/Redis removed — no background-task tier. Station offline-marking is done
+# inside the discovery loop (run_discovery.py::cleanup_offline_stations).
 
 
 
+# SPA uses fetch(..., { credentials: "include" }) for session + CSRF cookies.
+# Browsers REJECT Access-Control-Allow-Origin: * when credentials are included —
+# never use CORS_ALLOW_ALL_ORIGINS with credentialed requests.
+CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    o for o in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if o.strip()
 ]
+# Production same-origin static UI does not need CORS; keep localhost for LAN
+# admin tools if someone points a separate origin at the appliance.
+if not DEBUG:
+    # Allow extra origins from env only; do not fall back to wildcard.
+    pass
+
+# Allow the SPA's custom language header through CORS preflight (cross-origin dev only;
+# the shipped static export is same-origin). 'x-lang' selects the API message language.
+try:
+    from corsheaders.defaults import default_headers as _cors_default_headers
+    CORS_ALLOW_HEADERS = list(_cors_default_headers) + ["x-lang"]
+except Exception:
+    pass
 
 REST_FRAMEWORK = {
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # CLOSED BY DEFAULT: every endpoint requires login unless it explicitly sets
+    # AllowAny. Station/handshake endpoints (ping/sync/download/upload_report/version/
+    # license) and the auth endpoints opt back in to AllowAny. A forgotten new endpoint
+    # fails safe (401) instead of fails open.
     'DEFAULT_PERMISSION_CLASSES': [
-        'rest_framework.permissions.AllowAny',
+        'rest_framework.permissions.IsAuthenticated',
+    ],
+    # SessionAuthentication401 keeps a genuine "not logged in" as HTTP 401 (default DRF
+    # SessionAuthentication downgrades it to 403, which is then indistinguishable from a
+    # license/permission/CSRF denial). The SPA logs out ONLY on 401 — a license 403 must
+    # surface as an in-app demo message, not bounce the user to the login screen.
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'api.authentication.SessionAuthentication401',
     ],
 }
 
@@ -206,3 +285,4 @@ SPECTACULAR_SETTINGS = {
     'VERSION': '1.0.3',
     'SERVE_INCLUDE_SCHEMA': False,
 }
+

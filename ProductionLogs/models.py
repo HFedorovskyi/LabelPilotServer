@@ -15,7 +15,26 @@ class PrintedLabel(models.Model):
     
     unique_id = models.CharField(max_length=100, unique=True, verbose_name="Уникальный ID этикетки")
     printed_at = models.DateTimeField(verbose_name="Время печати")
-    
+
+    # Actual weighed net weight (grams) reported by the station. Used for VARIABLE-weight
+    # products in the dashboard total (fixed-weight products use Nomenclature.fixed_weight_grams).
+    # Nullable: legacy rows reported before this field existed have None.
+    weight_netto_grams = models.FloatField(null=True, blank=True, verbose_name="Фактический вес нетто (г)")
+    # A deleted weighing ("отвес"): the operator removed this pack from an open box. Excluded
+    # from good-production counts/weight; surfaced separately on the dashboard.
+    is_deleted = models.BooleanField(default=False, db_index=True, verbose_name="Отвес удалён")
+    # When the station deleted it (NOT printed_at). The dashboard buckets "deleted today" by this,
+    # so a pack printed yesterday but deleted today counts on the correct day. Null until deleted.
+    deleted_at = models.DateTimeField(null=True, blank=True, verbose_name="Время удаления отвеса")
+
+    # Audit / traceability passport fields, reported by the station per pack. Stored as the station
+    # holds them (strings); blank/None for legacy rows reported before these fields existed.
+    weight_brutto_grams = models.FloatField(null=True, blank=True, verbose_name="Вес брутто (г)")
+    batch = models.CharField(max_length=100, blank=True, default='', verbose_name="Партия")
+    production_date = models.CharField(max_length=32, blank=True, default='', verbose_name="Дата производства")
+    expiration_date = models.CharField(max_length=32, blank=True, default='', verbose_name="Срок годности")
+    barcode = models.CharField(max_length=128, blank=True, default='', verbose_name="Штрихкод/код маркировки")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Время получения сервером")
 
     def __str__(self):
@@ -38,7 +57,10 @@ class StationLog(models.Model):
     level = models.CharField(max_length=20, choices=LOG_LEVELS, default='INFO', verbose_name="Уровень")
     message = models.TextField(verbose_name="Сообщение")
     timestamp = models.DateTimeField(verbose_name="Время события")
-    
+    # Client-generated idempotency key so an online retry (or USB-then-online) of the same
+    # log row is skipped instead of duplicated. Nullable for legacy/USB reports without it.
+    event_uid = models.CharField(max_length=64, null=True, blank=True, unique=True, verbose_name="UID события")
+
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Время получения сервером")
 
     def __str__(self):

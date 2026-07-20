@@ -1,4 +1,5 @@
 from rest_framework import viewsets, status
+from server_activity.helpers import log_event
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
@@ -10,12 +11,17 @@ from api.serializers import (
     BarcodeTemplateSerializer, 
     LabelsStationsSerializer,
     ProductPackLinkSerializer,
-    GlobalProductAttributeSerializer
+    GlobalProductAttributeSerializer,
+    NomenclatureFolderSerializer,
+    PrintJobSerializer,
+    PalletSerializer,
 )
 
-from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute
+from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute, NomenclatureFolder
+from print_jobs.models import PrintJob
 
 from Packs.models import Pack
+from Pallets.models import Pallet
 from LabelTemplates.models import LabelTemplates
 from BarcodeTemplates.models import BarcodeTemplate
 from label_stations.models import LabelsStations
@@ -26,6 +32,23 @@ import base64
 import json
 import requests
 from common.utils import get_local_ip
+from api.i18n import tr
+
+
+def _require_license_for_export():
+    """Pushing REAL station data (nomenclature, identity, sync bundle) requires a valid
+    license — ALWAYS, independent of LICENSE_REQUIRED/STRICT. This is THE commercial
+    boundary the vendor chose: without a license the product runs in demo (full local UI
+    + the built-in client demo with a station/printer/scale work fine), but real data is
+    never exported to a station.
+
+    Implementation lives in licensing.enforcement (fresh signature re-verify + machine +
+    expiry + integrity fingerprint). A second gate runs inside crypto_utils.encrypt_data
+    in production so this helper is not the only line an attacker must delete.
+    """
+    from licensing.enforcement import require_export_or_http
+    require_export_or_http()
+
 
 class ProductPackLinkViewSet(viewsets.ModelViewSet):
     queryset = ProductPackLink.objects.all().order_by('-created')
@@ -36,12 +59,55 @@ class GlobalProductAttributeViewSet(viewsets.ModelViewSet):
     serializer_class = GlobalProductAttributeSerializer
 
 
+class NomenclatureFolderViewSet(viewsets.ModelViewSet):
+    """CRUD for nomenclature folders (server-side catalog organization)."""
+    queryset = NomenclatureFolder.objects.all().order_by('order', 'name')
+    serializer_class = NomenclatureFolderSerializer
+
+
+def _read_import_df(file_obj, sep_param, nrows=None):
+    """Read an uploaded .csv/.xls/.xlsx into a pandas DataFrame. CSV is decoded utf-8
+    then cp1251 (Russian Excel exports); separator 'auto'/empty -> sniffed by pandas."""
+    import pandas as pd
+    import io
+    name = (file_obj.name or '').lower()
+    if name.endswith('.csv'):
+        raw = file_obj.read()
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            text = raw.decode('cp1251')
+        sep = None if sep_param in (None, '', 'auto') else sep_param
+        return pd.read_csv(io.StringIO(text), sep=sep, nrows=nrows, on_bad_lines='skip', engine='python')
+    if name.endswith(('.xls', '.xlsx')):
+        return pd.read_excel(file_obj, nrows=nrows)
+    raise ValueError('Unsupported file format')
+
+
+def _import_to_int(raw, default=0):
+    s = str(raw).strip().replace(',', '.')
+    try:
+        return int(float(s)) if s else default
+    except (ValueError, TypeError):
+        return default
+
+
+def _import_to_float(raw, default=0.0):
+    s = str(raw).strip().replace(',', '.')   # Russian Excel uses a comma decimal
+    try:
+        return float(s) if s else default
+    except (ValueError, TypeError):
+        return default
+
+
 class NomenclatureViewSet(viewsets.ModelViewSet):
     queryset = Nomenclature.objects.all().order_by('-created')
     serializer_class = NomenclatureSerializer
 
     @action(detail=False, methods=['post'])
     def send_to_stations(self, request):
+        # Pushing the real nomenclature table to station IPs is a real-data export -> gated.
+        _require_license_for_export()
         stations_uuids = request.data.get('stations', [])
         if not stations_uuids:
              return Response({'error': 'No stations provided'}, status=status.HTTP_400_BAD_REQUEST)
@@ -74,9 +140,135 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
                 
         return Response({'results': results})
 
+    @action(detail=False, methods=['post'])
+    def preview_import(self, request):
+        file_obj = request.FILES.get('file')
+        if not file_obj:
+            return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            df = _read_import_df(file_obj, request.data.get('separator'), nrows=10).fillna('')
+        except Exception as e:
+            return Response({'error': f'Parsing failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({'columns': df.columns.tolist(), 'preview': df.to_dict(orient='records')})
+
+    @action(detail=False, methods=['post'])
+    def execute_import(self, request):
+        file_obj = request.FILES.get('file')
+        mapping_str = request.data.get('mapping')
+        if not file_obj or not mapping_str:
+            return Response({'error': 'File or mapping not provided'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            mapping = json.loads(mapping_str)
+        except json.JSONDecodeError:
+            return Response({'error': 'Invalid mapping format json'}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            df = _read_import_df(file_obj, request.data.get('separator')).fillna('')
+        except Exception as e:
+            return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        cols = {k: mapping.get(k) for k in (
+            'article', 'name', 'exp_date', 'close_box_counter',
+            'fixed_weight_grams', 'min_weight_grams', 'max_weight_grams')}
+        extra_map = mapping.get('extra_data_map') or {}
+        static = mapping.get('staticValues') or {}
+        static_fk = {}
+        for src, dst in (('portionContainerId', 'portion_container_id'),
+                         ('boxContainerId', 'box_container_id'),
+                         ('packLabelId', 'templates_pack_label_id'),
+                         ('boxLabelId', 'templates_box_label_id')):
+            if static.get(src):
+                static_fk[dst] = static[src]
+
+        def cell(row, key):
+            col = cols[key]
+            return row.get(col, '') if col else ''
+
+        # 1) Validate EVERY row up front (collect all errors), dedup by article (last wins).
+        #    to_dict('records') iterates plain dicts — far faster than DataFrame.iterrows().
+        errors, parsed = [], {}
+        for i, row in enumerate(df.to_dict('records')):
+            article = str(cell(row, 'article')).strip()
+            name = str(cell(row, 'name')).strip()
+            if not article or not name:
+                errors.append(tr('import.rowMissingArticleOrName', row=i + 2))
+                continue
+            extra = {}
+            for attr_name, col in extra_map.items():
+                if col:
+                    val = row.get(col)
+                    if val is not None and str(val).strip() not in ('', 'None'):
+                        extra[attr_name] = val
+            fwg = _import_to_float(cell(row, 'fixed_weight_grams'))
+            parsed[article] = dict(
+                name=name,
+                exp_date=_import_to_int(cell(row, 'exp_date')),
+                close_box_counter=_import_to_int(cell(row, 'close_box_counter')),
+                fixed_weight_grams=fwg,
+                min_weight_grams=_import_to_float(cell(row, 'min_weight_grams')),
+                max_weight_grams=_import_to_float(cell(row, 'max_weight_grams')),
+                is_fixed_weight=fwg > 0,   # a product with a fixed weight set IS fixed-weight
+                extra_data=extra,
+                **static_fk,
+            )
+
+        if not parsed:
+            return Response({'success': True, 'imported': 0, 'created': 0, 'updated': 0,
+                             'errors': errors[:10], 'error_count': len(errors)})
+
+        # 2) Fetch existing in chunks (huge files would blow the SQLite param limit), then a
+        #    single bulk create + bulk update in one transaction.
+        from django.db import transaction
+        from django.db.models import Max
+        from django.utils import timezone
+        existing, arts = {}, list(parsed.keys())
+        for j in range(0, len(arts), 900):
+            for n in Nomenclature.objects.filter(article__in=arts[j:j + 900]):
+                existing[n.article] = n
+
+        to_create, to_update, upd_fields = [], [], set()
+        for article, fields in parsed.items():
+            if article in existing:
+                obj = existing[article]
+                for k, v in fields.items():
+                    setattr(obj, k, v)
+                    upd_fields.add(k)
+                obj.edited = timezone.now()
+                upd_fields.add('edited')
+                to_update.append(obj)
+            else:
+                to_create.append(Nomenclature(article=article, **fields))
+
+        if to_create:   # give new rows incrementing sort order after the current max
+            next_order = (Nomenclature.objects.aggregate(m=Max('order'))['m'] or 0) + 1
+            for idx, obj in enumerate(to_create):
+                obj.order = next_order + idx
+
+        try:
+            with transaction.atomic():
+                if to_create:
+                    Nomenclature.objects.bulk_create(to_create, batch_size=500)
+                if to_update:
+                    Nomenclature.objects.bulk_update(to_update, list(upd_fields), batch_size=500)
+        except Exception as e:
+            return Response({'error': f'Import failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        return Response({
+            'success': True,
+            'imported': len(to_create) + len(to_update),
+            'created': len(to_create),
+            'updated': len(to_update),
+            'errors': errors[:10],
+            'error_count': len(errors),
+        })
+
 class PacksViewSet(viewsets.ModelViewSet):
     queryset = Pack.objects.all().order_by('-created')
     serializer_class = PackSerializer
+
+
+class PalletViewSet(viewsets.ModelViewSet):
+    queryset = Pallet.objects.all().prefetch_related('items', 'items__nomenclature').order_by('-created')
+    serializer_class = PalletSerializer
 
 class LabelTemplatesViewSet(viewsets.ModelViewSet):
     queryset = LabelTemplates.objects.all()
@@ -88,27 +280,39 @@ class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def generate(self, request):
-        from api.utils import BarcodeGenerator
+        from api.utils import BarcodeGenerator, validate_structure
+
         from Nomenclature.models import Nomenclature
-        
+
         structure = request.data.get('barcode_structure')
         product_id = request.data.get('product_id')
-        
+
         if not structure:
-            # Fallback for checking how it was sent in original
-            structure = request.data
-            
+            return Response({'errors': [tr('barcode.noStructure')]}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Validate the structure before rendering. Returns 400 {errors: [...]}.
+        validation_errors = validate_structure(structure)
+        if validation_errors:
+            return Response({'errors': validation_errors}, status=status.HTTP_400_BAD_REQUEST)
+
         test_product = None
         if product_id:
             try:
                 test_product = Nomenclature.objects.get(pk=product_id)
             except Nomenclature.DoesNotExist:
                 pass
-            
+
         try:
             generator = BarcodeGenerator()
-            image_base64 = generator.generate_image_base64(structure, product=test_product)
-            return Response({'success': True, 'png': image_base64})
+            image_base64, data_string, warnings = generator.generate_image_base64(
+                structure, product=test_product
+            )
+            return Response({
+                'success': True,
+                'png': image_base64,
+                'data_string': data_string,
+                'warnings': warnings,
+            })
         except Exception as e:
             import traceback
             traceback.print_exc()
@@ -120,6 +324,7 @@ class FullSyncView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        _require_license_for_export()
         barcodes = BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data
         labels = LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data
         containers = PackSerializer(Pack.objects.all(), many=True).data
@@ -164,10 +369,110 @@ class VersionView(APIView):
         })
 
 
+class LicenseView(APIView):
+    """Public license status for the admin UI: edition, customer, expiry, seat usage,
+    and this server's machine_id (so the vendor can issue a machine-bound license).
+    GET /api/v1/license/"""
+    permission_classes = [AllowAny]
+
+    def get(self, request):
+        from django.conf import settings
+        from licensing import license_status, license_state, commercial_license_ok
+        data = dict(license_status())
+        st = license_state()
+        # Surfaced separately so the admin UI can tell "bound to a different machine"
+        # apart from "no license" (license_status() reports a wrong-machine license as
+        # unlicensed). `strict` reflects the effective fail-closed posture.
+        data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) and not getattr(settings, 'DEBUG', False)
+        data['signature_valid'] = st.signature_valid
+        data['machine_ok'] = st.machine_ok
+        data['stations_used'] = LabelsStations.objects.count()
+        ok, reason = commercial_license_ok()
+        data['commercial_ok'] = ok
+        data['commercial_reason'] = reason
+        try:
+            from licensing.integrity import integrity_status
+            data['integrity'] = integrity_status()
+        except Exception:
+            data['integrity'] = {'integrity_ok': None}
+        return Response(data)
+
+
+from api.permissions import IsAdmin as _IsAdmin
+
+
+class LicenseImportView(APIView):
+    """Admin-only: install/replace license.lpl from an uploaded file (or pasted token).
+    The Ed25519 signature is verified BEFORE writing, so only a vendor-signed license is
+    accepted. Picked up live — license_state() caches on the file's (mtime, size), so the
+    server flips out of demo on the next status read without a restart.
+    POST /api/v1/license/import/  (multipart 'file' OR JSON {token})."""
+    permission_classes = [_IsAdmin]
+
+    def post(self, request):
+        from licensing.core import _verify_and_parse, _license_path, license_status
+        from licensing import license_state
+
+        raw = None
+        f = request.FILES.get('file')
+        if f is not None:
+            try:
+                raw = f.read().decode('utf-8').strip()
+            except Exception:
+                raw = None
+        if not raw:
+            raw = (request.data.get('token') or '').strip()
+        if not raw:
+            return Response({'detail': tr('license.importNoFile')}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            _verify_and_parse(raw)  # raises on bad signature / malformed payload
+        except Exception:
+            return Response({'detail': tr('license.importInvalid')}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            _license_path().write_text(raw, encoding='utf-8')
+        except Exception as e:
+            return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        data = dict(license_status())
+        st = license_state()
+        data['signature_valid'] = st.signature_valid
+        data['machine_ok'] = st.machine_ok
+        data['stations_used'] = LabelsStations.objects.count()
+        # Notify sales service: license file installed on this machine (async, optional).
+        try:
+            from licensing.telemetry import report_license_activated
+            report_license_activated(data.get("license_id"))
+        except Exception:
+            pass
+        return Response(data)
+
+
 class StationsViewSet(viewsets.ModelViewSet):
     queryset = LabelsStations.objects.all()
     serializer_class = LabelsStationsSerializer
     lookup_field = 'station_uuid'
+
+    # Station/handshake endpoints stay OPEN (stations have no user session) — gated by
+    # license (_require_license_for_export) + the LAN boundary, not user auth. Everything
+    # else (station CRUD, send-to-station) inherits closed-by-default IsAuthenticated.
+    _PUBLIC_ACTIONS = {"ping", "server_ip", "full_dump", "upload_report",
+                       "download_identity", "download_update", "sync_data"}
+
+    def get_permissions(self):
+        from rest_framework.permissions import AllowAny
+        if getattr(self, "action", None) in self._PUBLIC_ACTIONS:
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def perform_create(self, serializer):
+        # Seat limit applies only to an over-cap or invalid license; no license = unlimited.
+        from licensing import seat_available
+        from rest_framework.exceptions import ValidationError
+        if not seat_available(LabelsStations.objects.count()):
+            raise ValidationError({"license": tr('station.seatLimitReached')})
+        serializer.save()
 
 
     def _gather_sync_data(self, station, sync_type='UPDATE'):
@@ -175,6 +480,10 @@ class StationsViewSet(viewsets.ModelViewSet):
         Helper method to gather all data for a station sync.
         Returns a unified dictionary structure.
         """
+        # Third dispersed gate: even if a caller forgot _require_license_for_export(),
+        # assembling a real sync payload still demands a commercial license.
+        _require_license_for_export()
+
         import datetime
         from common.utils import get_local_ip
         
@@ -201,9 +510,20 @@ class StationsViewSet(viewsets.ModelViewSet):
             "server_url": server_url
         }
 
+        # Operators for this station (station-specific + the shared/global pool). pin_hash
+        # is included so the client validates PINs locally/offline. License-gated like the
+        # rest of the bundle (the export endpoints call _require_license_for_export).
+        from label_stations.models import Operator
+        from django.db.models import Q
+        operators = [{
+            "uuid": str(o.uuid), "full_name": o.full_name, "short_code": o.short_code,
+            "pin_hash": o.pin_hash, "is_active": o.is_active,
+        } for o in Operator.objects.filter(is_active=True).filter(Q(station=station) | Q(station__isnull=True))]
+
         data = {
             "station": station_info,
             "payload": {
+                "operators": operators,
                 "barcodes": barcodes,
                 "labels": labels,
                 "containers": containers,
@@ -227,6 +547,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         """
         Pushes full data set to the station (Online).
         """
+        _require_license_for_export()
         station = self.get_object()
         
         if not station.station_ip:
@@ -238,9 +559,20 @@ class StationsViewSet(viewsets.ModelViewSet):
         target_port = station.station_port or 5556
         url = f'http://{station.station_ip}:{target_port}/api/full_sync'
 
+        # Encrypt the live push as LPI2 (the signed license token is embedded) so the station can
+        # AUTHENTICATE the sender — an unauthenticated plaintext push from a rogue LAN host is
+        # rejected. Matches the already-encrypted USB/download path (download_update).
+        from common.crypto_utils import encrypt_data
         try:
-            resp = requests.post(url, json=payload, timeout=5)
+            resp = requests.post(
+                url, data=encrypt_data(payload),
+                headers={'Content-Type': 'application/octet-stream'}, timeout=5,
+            )
             resp.raise_for_status()
+            from django.utils import timezone as tz
+            station.last_sync_at = tz.now()
+            station.save(update_fields=['last_sync_at', 'changed_at'])
+            log_event('station_synced', f'Данные синхронизированы со станцией «{station.station_name}» (онлайн)')
             return Response({'status': 'success', 'message': f'Data synced to {station.station_name}'})
         except requests.RequestException as e:
             error_msg = f'Failed to connect to station: {str(e)}'
@@ -258,6 +590,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         """
         Generates an encrypted .lps file for offline update.
         """
+        _require_license_for_export()
         from common.crypto_utils import encrypt_data
         from django.http import HttpResponse
         import datetime
@@ -278,6 +611,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         Generates an encrypted .lpi file for offline station setup.
         Now uses the unified structure and includes full data.
         """
+        _require_license_for_export()
         from common.crypto_utils import encrypt_data
         from django.http import HttpResponse
 
@@ -295,93 +629,153 @@ class StationsViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['post'])
     def upload_report(self, request):
-        """
-        Accepts an encrypted .lpr file from a station.
+        """Ingest an encrypted .lpr report from a station — same payload over either
+        transport: USB upload OR the station's automatic online push.
+
+        Built to absorb many stations (10-20) reporting on a 5-min cadence: FKs are
+        batch-resolved, rows are bulk_create'd with ignore_conflicts, and the whole
+        write is one transaction. Fully idempotent — PrintedLabel dedupes on unique_id
+        and StationLog on event_uid, so retries / USB-then-online never double-count.
         """
         from common.crypto_utils import decrypt_data
-        
+        from ProductionLogs.models import PrintedLabel, StationLog
+        from django.utils.dateparse import parse_datetime
+        from django.utils import timezone as tz
+        from django.db import transaction
+        from django.core.exceptions import ValidationError as DjangoValidationError
+
         file_obj = request.FILES.get('file')
         if not file_obj:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
         try:
-            encrypted_data = file_obj.read()
-            data = decrypt_data(encrypted_data)
+            data = decrypt_data(file_obj.read())
         except Exception as e:
-             return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
-             
-        # Process report data
-        # For now, just log it and return success
-        # In future: Save to TransactionLog model
-        
-        station_uuid = data.get('station_uuid')
-        # report_type = data.get('type')
-        
-        from ProductionLogs.models import PrintedLabel, StationLog
-        from django.utils.dateparse import parse_datetime
-        
-        station = LabelsStations.objects.filter(station_uuid=station_uuid).first()
-        
-        # 1. Process Printed Labels
-        labels_data = data.get('printed_labels', [])
-        labels_count = 0
-        for item in labels_data:
-            unique_id = item.get('unique_id')
-            # Skip if already exists (idempotency)
-            if not unique_id or PrintedLabel.objects.filter(unique_id=unique_id).exists():
-                continue
-            
-            # Resolve FKs if possible
-            prod_id = item.get('product_id')
-            pack_id = item.get('pack_id')
-            
-            prod = Nomenclature.objects.filter(pk=prod_id).first() if prod_id else None
-            pack = Pack.objects.filter(pk=pack_id).first() if pack_id else None
-            
-            try:
-                PrintedLabel.objects.create(
-                    station=station,
-                    station_user_name=item.get('user_name', ''),
-                    product=prod,
-                    product_name_snapshot=item.get('product_name', '') or (prod.name if prod else ''),
-                    pack=pack,
-                    pack_name_snapshot=item.get('pack_name', '') or (pack.name if pack else ''),
-                    unique_id=unique_id,
-                    printed_at=parse_datetime(item.get('printed_at'))
-                )
-                labels_count += 1
-            except Exception as e:
-                print(f"Error saving label {unique_id}: {e}")
+            return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
-        # 2. Process Logs
-        logs_data = data.get('logs', [])
-        logs_count = 0
-        for item in logs_data:
-            try:
-                StationLog.objects.create(
-                    station=station,
-                    level=item.get('level', 'INFO'),
-                    message=item.get('message', ''),
-                    timestamp=parse_datetime(item.get('timestamp'))
-                )
-                logs_count += 1
-            except Exception as e:
-                print(f"Error saving log: {e}")
-        
-        # 3. Update Station Status if provided
-        if station and 'status' in data:
-             # Example: could update last_seen, is_online (though report implies async)
-             pass 
-        
-        print(f"Report processed for {station_uuid}: {labels_count} labels, {logs_count} logs.")
-        
-        return Response({
-            'status': 'success', 
-            'message': 'Report processed successfully',
-            'details': {
-                'labels_processed': labels_count,
-                'logs_processed': logs_count
+        station_uuid = data.get('station_uuid')
+        # station_uuid is a UUIDField; a malformed/non-UUID value raises ValidationError.
+        # Treat it like an unknown station (process unattached) rather than 500 the endpoint.
+        try:
+            station = LabelsStations.objects.filter(station_uuid=station_uuid).first() if station_uuid else None
+        except (ValueError, DjangoValidationError):
+            station = None
+
+        labels_data = [it for it in (data.get('printed_labels') or []) if it.get('unique_id')]
+        deleted_data = [it for it in (data.get('deleted_labels') or []) if it.get('unique_id')]
+        logs_data = data.get('logs') or []
+
+        new_labels, new_logs = [], []
+        deleted_uids = [it['unique_id'] for it in deleted_data]
+
+        def _audit(it):
+            # Per-pack traceability passport (same for the good + deleted insert paths).
+            return {
+                'weight_netto_grams': it.get('weight_netto_grams'),
+                'weight_brutto_grams': it.get('weight_brutto_grams'),
+                'batch': it.get('batch') or '',
+                'production_date': it.get('production_date') or '',
+                'expiration_date': it.get('expiration_date') or '',
+                'barcode': it.get('barcode') or '',
             }
+
+        # --- Printed labels: skip ids already stored, batch-resolve product/pack FKs ---
+        if labels_data:
+            uids = [it['unique_id'] for it in labels_data]
+            seen = set(PrintedLabel.objects.filter(unique_id__in=uids).values_list('unique_id', flat=True))
+            prods = Nomenclature.objects.in_bulk({it['product_id'] for it in labels_data if it.get('product_id')})
+            packs = Pack.objects.in_bulk({it['pack_id'] for it in labels_data if it.get('pack_id')})
+            for it in labels_data:
+                uid = it['unique_id']
+                if uid in seen:
+                    continue
+                seen.add(uid)  # also dedupes within this one payload
+                prod = prods.get(it.get('product_id'))
+                pack = packs.get(it.get('pack_id'))
+                new_labels.append(PrintedLabel(
+                    station=station,
+                    station_user_name=it.get('user_name', ''),
+                    product=prod,
+                    product_name_snapshot=it.get('product_name', '') or (prod.name if prod else ''),
+                    pack=pack,
+                    pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
+                    unique_id=uid,
+                    printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
+                    **_audit(it),
+                ))
+
+        # --- Logs: skip event_uids already stored (legacy/USB logs without one are kept) ---
+        if logs_data:
+            euids = [it['event_uid'] for it in logs_data if it.get('event_uid')]
+            seen_l = set(StationLog.objects.filter(event_uid__in=euids).values_list('event_uid', flat=True)) if euids else set()
+            for it in logs_data:
+                euid = it.get('event_uid')
+                if euid and euid in seen_l:
+                    continue
+                if euid:
+                    seen_l.add(euid)
+                new_logs.append(StationLog(
+                    station=station,
+                    level=it.get('level', 'INFO'),
+                    message=it.get('message', ''),
+                    timestamp=parse_datetime(it.get('timestamp') or '') or tz.now(),
+                    event_uid=euid or None,
+                ))
+
+        # --- Deleted weighings ("отвесы"): the station removed these packs from an open box.
+        # Insert any not-yet-stored ones as is_deleted=True; the transaction below ALSO flips
+        # every reported deleted uid to is_deleted=True, so a pack reported as good on an
+        # earlier delta and only later deleted is reconciled. Idempotent on replay.
+        if deleted_data:
+            seen_d = set(PrintedLabel.objects.filter(unique_id__in=deleted_uids).values_list('unique_id', flat=True))
+            dprods = Nomenclature.objects.in_bulk({it['product_id'] for it in deleted_data if it.get('product_id')})
+            dpacks = Pack.objects.in_bulk({it['pack_id'] for it in deleted_data if it.get('pack_id')})
+            for it in deleted_data:
+                uid = it['unique_id']
+                if uid in seen_d:
+                    continue
+                seen_d.add(uid)
+                prod = dprods.get(it.get('product_id'))
+                pack = dpacks.get(it.get('pack_id'))
+                new_labels.append(PrintedLabel(
+                    station=station,
+                    station_user_name=it.get('user_name', ''),
+                    product=prod,
+                    product_name_snapshot=it.get('product_name', '') or (prod.name if prod else ''),
+                    pack=pack,
+                    pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
+                    unique_id=uid,
+                    printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
+                    **_audit(it),
+                    is_deleted=True,
+                    deleted_at=parse_datetime(it.get('deleted_at') or '') or tz.now(),
+                ))
+
+        with transaction.atomic():
+            if new_labels:
+                PrintedLabel.objects.bulk_create(new_labels, ignore_conflicts=True)
+            if new_logs:
+                StationLog.objects.bulk_create(new_logs, ignore_conflicts=True)
+            # Reconcile good -> deleted for packs already stored from an earlier delta (Case B),
+            # stamping each row's own deletion time so the dashboard buckets it on the right day.
+            # NOTE: deletion is TERMINAL — the client has no "undelete", so this only ever flips
+            # is_deleted False -> True; a row never goes back to good.
+            for it in deleted_data:
+                PrintedLabel.objects.filter(unique_id=it['unique_id']).update(
+                    is_deleted=True,
+                    deleted_at=parse_datetime(it.get('deleted_at') or '') or tz.now(),
+                )
+            if station:
+                station.last_sync_at = tz.now()
+                station.save(update_fields=['last_sync_at', 'changed_at'])
+
+        labels_count, logs_count, deleted_count = len(new_labels), len(new_logs), len(deleted_data)
+        station_label = station.station_name if station else station_uuid
+        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {deleted_count} отвесов, {logs_count} логов')
+
+        return Response({
+            'status': 'success',
+            'message': 'Report processed successfully',
+            'details': {'labels_processed': labels_count, 'deleted_processed': deleted_count, 'logs_processed': logs_count},
         })
 
     @action(detail=False, methods=['get'])
@@ -428,6 +822,11 @@ class StationsViewSet(viewsets.ModelViewSet):
         Now reuses gather_sync_data logic if possible, or keeps separate.
         Let's unify slightly but keep structure compatible.
         """
+        # full_dump is AllowAny (stations have no user session). The gate must run FIRST,
+        # unconditionally — otherwise an anonymous request with no/unknown station_uuid
+        # falls through to the fallback below and leaks the entire dataset with no license.
+        _require_license_for_export()
+
         station_number = None
         station_uuid = request.query_params.get('station_uuid')
         if station_uuid:
@@ -436,7 +835,7 @@ class StationsViewSet(viewsets.ModelViewSet):
                 return Response(self._gather_sync_data(station))
             except LabelsStations.DoesNotExist:
                 pass
-        
+
         # Fallback if no station identified
         data = {
             'barcodes': BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data,
@@ -448,3 +847,178 @@ class StationsViewSet(viewsets.ModelViewSet):
             'station_number': None
         }
         return Response(data)
+
+
+class PrintJobViewSet(viewsets.ModelViewSet):
+    queryset = PrintJob.objects.all().select_related('station', 'nomenclature')
+    serializer_class = PrintJobSerializer
+
+    # USB download endpoints stay open for the offline/USB transfer flow.
+    _PUBLIC_ACTIONS = {"download_for_usb", "download_usb_bundle"}
+
+    def get_permissions(self):
+        from rest_framework.permissions import AllowAny
+        if getattr(self, "action", None) in self._PUBLIC_ACTIONS:
+            return [AllowAny()]
+        return super().get_permissions()
+
+    def perform_create(self, serializer):
+        job = serializer.save()
+        station_name = job.station.station_name if job.station else '—'
+        product_name = job.nomenclature.name if job.nomenclature else '—'
+        log_event('job_created', f'Создано задание #{job.pk} «{product_name}» для станции «{station_name}»')
+
+    @action(detail=True, methods=['post'])
+    def send_to_station(self, request, pk=None):
+        """
+        Sends a print job to the assigned station via HTTP.
+        """
+        # Pushing a real print job (nomenclature payload) to a station is a data export -> gated.
+        _require_license_for_export()
+        job = self.get_object()
+        station = job.station
+
+        if not station.station_ip:
+            job.status = 'error'
+            job.save(update_fields=['status', 'updated_at'])
+            return Response({'error': tr('station.noIp')}, status=status.HTTP_400_BAD_REQUEST)
+
+        payload = {
+            'type': 'PRINT_JOB',
+            'job_id': job.pk,
+            'nomenclature_id': job.nomenclature_id,
+            'nomenclature_name': job.nomenclature.name,
+            'nomenclature_article': job.nomenclature.article,
+            'quantity': job.quantity,
+            'quantity_unit': job.quantity_unit,
+            'batch_number': job.batch_number,
+            'marking_date': job.marking_date.isoformat() if job.marking_date else None,
+        }
+
+        target_port = station.station_port or 5556
+        url = f'http://{station.station_ip}:{target_port}/api/print_job'
+
+        # Encrypt the live push as LPI2 so the station can authenticate the sender (see sync_data).
+        from common.crypto_utils import encrypt_data
+        try:
+            resp = requests.post(
+                url, data=encrypt_data(payload),
+                headers={'Content-Type': 'application/octet-stream'}, timeout=5,
+            )
+            resp.raise_for_status()
+            job.status = 'sent'
+            job.save(update_fields=['status', 'updated_at'])
+            log_event('job_sent', f'Задание #{job.pk} «{job.nomenclature.name}» отправлено на станцию «{station.station_name}»')
+            return Response({'status': 'success', 'message': tr('job.sentToStation', station=station.station_name)})
+        except requests.RequestException as e:
+            job.status = 'error'
+            job.save(update_fields=['status', 'updated_at'])
+            return Response({'error': tr('job.sendError', error=str(e))}, status=status.HTTP_502_BAD_GATEWAY)
+
+    @action(detail=True, methods=['get'])
+    def download_for_usb(self, request, pk=None):
+        """
+        Downloads a single print job as an encrypted .lpj file for USB transfer.
+        """
+        _require_license_for_export()
+        from common.crypto_utils import encrypt_data
+        from django.http import HttpResponse
+        import datetime
+
+        job = self.get_object()
+        data = {
+            'type': 'PRINT_JOB',
+            'jobs': [{
+                'job_id': job.pk,
+                'nomenclature_id': job.nomenclature_id,
+                'nomenclature_name': job.nomenclature.name,
+                'nomenclature_article': job.nomenclature.article,
+                'quantity': job.quantity,
+                'quantity_unit': job.quantity_unit,
+                'batch_number': job.batch_number,
+                'marking_date': job.marking_date.isoformat() if job.marking_date else None,
+            }],
+            'station': {
+                'uuid': str(job.station.station_uuid),
+                'number': job.station.station_number,
+                'name': job.station.station_name,
+            },
+            'meta': {
+                'generated_at': datetime.datetime.now().isoformat(),
+                'server_version': settings.VERSION,
+            }
+        }
+
+        encrypted = encrypt_data(data)
+        filename = f"job_{job.pk}_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.lpj"
+        response = HttpResponse(encrypted, content_type='application/octet-stream')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        job.status = 'sent'
+        job.save(update_fields=['status', 'updated_at'])
+        return response
+
+    @action(detail=False, methods=['get'])
+    def download_usb_bundle(self, request):
+        """
+        Downloads ALL pending print jobs as a single encrypted .lpj file,
+        grouped by station. Ideal for USB transfer of multiple jobs at once.
+        Optionally filter by station with ?station_id=<id>.
+        """
+        _require_license_for_export()
+        from common.crypto_utils import encrypt_data
+        from django.http import HttpResponse
+        import datetime
+
+        station_id = request.query_params.get('station_id')
+        qs = PrintJob.objects.filter(status='pending').select_related('station', 'nomenclature')
+        if station_id:
+            qs = qs.filter(station_id=station_id)
+
+        if not qs.exists():
+            return Response({'error': tr('job.noPending')}, status=status.HTTP_404_NOT_FOUND)
+
+        stations_data = {}
+        job_ids = []
+        for job in qs:
+            key = str(job.station.station_uuid)
+            if key not in stations_data:
+                stations_data[key] = {
+                    'station': {
+                        'uuid': str(job.station.station_uuid),
+                        'number': job.station.station_number,
+                        'name': job.station.station_name,
+                    },
+                    'jobs': []
+                }
+            stations_data[key]['jobs'].append({
+                'job_id': job.pk,
+                'nomenclature_id': job.nomenclature_id,
+                'nomenclature_name': job.nomenclature.name,
+                'nomenclature_article': job.nomenclature.article,
+                'quantity': job.quantity,
+                'quantity_unit': job.quantity_unit,
+                'batch_number': job.batch_number,
+                'marking_date': job.marking_date.isoformat() if job.marking_date else None,
+            })
+            job_ids.append(job.pk)
+
+        data = {
+            'type': 'PRINT_JOB_BUNDLE',
+            'stations': list(stations_data.values()),
+            'meta': {
+                'total_jobs': len(job_ids),
+                'generated_at': datetime.datetime.now().isoformat(),
+                'server_version': settings.VERSION,
+            }
+        }
+
+        encrypted = encrypt_data(data)
+        filename = f"print_jobs_{datetime.datetime.now().strftime('%Y%m%d_%H%M')}.lpj"
+        response = HttpResponse(encrypted, content_type='application/octet-stream')
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+
+        # Mark all bundled jobs as sent
+        qs.filter(pk__in=job_ids).update(status='sent')
+        return response
+
