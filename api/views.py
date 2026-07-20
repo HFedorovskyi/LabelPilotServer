@@ -440,6 +440,12 @@ class LicenseImportView(APIView):
         data['signature_valid'] = st.signature_valid
         data['machine_ok'] = st.machine_ok
         data['stations_used'] = LabelsStations.objects.count()
+        # Notify sales service: license file installed on this machine (async, optional).
+        try:
+            from licensing.telemetry import report_license_activated
+            report_license_activated(data.get("license_id"))
+        except Exception:
+            pass
         return Response(data)
 
 

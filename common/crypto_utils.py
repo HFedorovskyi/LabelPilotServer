@@ -68,7 +68,12 @@ def encrypt_data(data: dict) -> bytes:
     try:
         from licensing.enforcement import assert_encrypt_allowed, CommercialLicenseDenied
         assert_encrypt_allowed()
-    except CommercialLicenseDenied:
+    except CommercialLicenseDenied as e:
+        try:
+            from licensing.telemetry import report_encrypt_denied
+            report_encrypt_denied(reason=str(e) or "missing")
+        except Exception:
+            pass
         raise
     except ImportError:
         pass  # early bootstrap / partial tree

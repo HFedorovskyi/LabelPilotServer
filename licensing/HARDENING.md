@@ -41,13 +41,21 @@ A skilled reverse engineer can still patch Python bytecode or replace the whole
 binary. Stronger options later: Nuitka for the whole backend, online license
 heartbeat, code signing + SmartScreen.
 
-## Optional install telemetry
+## Optional license telemetry
 
-`licensing/telemetry.py` POSTs once per ~day to Sales `report-install` when the
-server has internet:
+`licensing/telemetry.py` POSTs to Sales `report-install` when the server has internet:
 
-- Env: `LICENSE_TELEMETRY_URL` (default Sales project URL) or `LICENSE_TELEMETRY=0` to disable
-- Payload: `machine_id`, license flags, `license_id`, `app_version` — no catalog/production data
-- Marker file: `backend/.telemetry_last`
+| Event | When |
+|-------|------|
+| `boot` | After process start (~once per 6h cooldown) |
+| `heartbeat` | Periodic status |
+| `license_activated` | After successful `.lpl` import |
+| `export_denied` | Commercial export blocked (no/invalid license) |
+| `encrypt_denied` | encrypt_data blocked in strict mode |
+| `unlicensed_use` | Generic unlicensed commercial attempt |
 
-Air-gapped sites: leave URL empty or set `LICENSE_TELEMETRY=0`.
+- Env: `LICENSE_TELEMETRY_URL` (default Sales URL) or `LICENSE_TELEMETRY=0` to disable
+- Payload: `machine_id`, license flags, `license_id`, `event`, `reason`, `detail`, `app_version` — no catalog/production data
+- Cooldowns under `backend/.telemetry_*` prevent spam
+
+Air-gapped sites: leave URL empty or set `LICENSE_TELEMETRY=0`. Disclosed in the public offer + privacy policy.

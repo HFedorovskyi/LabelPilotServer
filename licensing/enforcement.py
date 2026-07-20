@@ -124,7 +124,13 @@ def require_export_or_http() -> None:
     """DRF-friendly wrapper: CommercialLicenseDenied -> rest_framework PermissionDenied."""
     try:
         assert_export_allowed()
-    except CommercialLicenseDenied:
+    except CommercialLicenseDenied as e:
+        # Full log of unlicensed commercial export attempts (async, never blocks).
+        try:
+            from licensing.telemetry import report_export_denied
+            report_export_denied(reason=str(e) or "missing", detail="export")
+        except Exception:
+            pass
         from rest_framework.exceptions import PermissionDenied
         try:
             from api.i18n import tr
