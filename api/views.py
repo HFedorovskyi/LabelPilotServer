@@ -40,18 +40,14 @@ def _require_license_for_export():
     license — ALWAYS, independent of LICENSE_REQUIRED/STRICT. This is THE commercial
     boundary the vendor chose: without a license the product runs in demo (full local UI
     + the built-in client demo with a station/printer/scale work fine), but real data is
-    never exported to a station. STRICT mode governs other things (station registration,
-    closed-by-default endpoints); it does NOT relax this gate.
+    never exported to a station.
 
-    The gate is deliberately stricter than `valid_for_key`: it also requires the license
-    be machine-bound-OK and not expired. Decryption of EXISTING data must never brick
-    (that's what valid_for_key guards), but exporting NEW data is an active commercial
-    action that demands a fully-valid, non-expired, correctly-bound license."""
-    from licensing import license_state
-    from rest_framework.exceptions import PermissionDenied
-    st = license_state()
-    if not (st.valid_for_key and st.machine_ok and not st.expired):
-        raise PermissionDenied(tr('license.exportDenied'))
+    Implementation lives in licensing.enforcement (fresh signature re-verify + machine +
+    expiry + integrity fingerprint). A second gate runs inside crypto_utils.encrypt_data
+    in production so this helper is not the only line an attacker must delete.
+    """
+    from licensing.enforcement import require_export_or_http
+    require_export_or_http()
 
 
 class ProductPackLinkViewSet(viewsets.ModelViewSet):
@@ -381,7 +377,7 @@ class LicenseView(APIView):
 
     def get(self, request):
         from django.conf import settings
-        from licensing import license_status, license_state
+        from licensing import license_status, license_state, commercial_license_ok
         data = dict(license_status())
         st = license_state()
         # Surfaced separately so the admin UI can tell "bound to a different machine"
@@ -391,6 +387,14 @@ class LicenseView(APIView):
         data['signature_valid'] = st.signature_valid
         data['machine_ok'] = st.machine_ok
         data['stations_used'] = LabelsStations.objects.count()
+        ok, reason = commercial_license_ok()
+        data['commercial_ok'] = ok
+        data['commercial_reason'] = reason
+        try:
+            from licensing.integrity import integrity_status
+            data['integrity'] = integrity_status()
+        except Exception:
+            data['integrity'] = {'integrity_ok': None}
         return Response(data)
 
 
@@ -470,6 +474,10 @@ class StationsViewSet(viewsets.ModelViewSet):
         Helper method to gather all data for a station sync.
         Returns a unified dictionary structure.
         """
+        # Third dispersed gate: even if a caller forgot _require_license_for_export(),
+        # assembling a real sync payload still demands a commercial license.
+        _require_license_for_export()
+
         import datetime
         from common.utils import get_local_ip
         

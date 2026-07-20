@@ -1,0 +1,10 @@
+{
+  "files": {
+    "api/views.py": "f10bddbbbaca96f14df06ce1d6ccfa40bf7f7a141f104eeab803944ed5ecadf1",
+    "common/crypto_utils.py": "511cfbb2200a0b5d3d32508b799fec4635c01f54dde942f1aa5608d5810fc91f",
+    "licensing/core.py": "33c18de79f7cb96771e118c6051dd712e89522fd67818e74175ee2579b739e26",
+    "licensing/enforcement.py": "66905b9d0aff38d854e90be28d2e8a1eec2ffa0f70d0792642e2047ec90e06a1",
+    "licensing/integrity.py": "b5d86b38190742fd6bc813d7c34df3200f30a19bf6d2c6830f210f4cb6ae43e8"
+  },
+  "version": 1
+}

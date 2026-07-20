@@ -59,7 +59,24 @@ def encrypt_data(data: dict) -> bytes:
     client can derive the SAME key and decrypt:
         b"LPI2\\n" + <license token ascii> + b"\\n" + [IV(16)] + [PKCS7-padded ciphertext]
     Without a license it is the legacy format: [IV(16)] + [ciphertext].
+
+    Second commercial gate: in production (LICENSE_REQUIRED + not DEBUG) refuses to mint
+    blobs without a fully valid commercial license — so removing only the view-layer
+    `_require_license_for_export()` call is not enough to produce station payloads.
     """
+    # Dispersed gate (crypto path). Fail closed in prod; no-op in dev.
+    try:
+        from licensing.enforcement import assert_encrypt_allowed, CommercialLicenseDenied
+        assert_encrypt_allowed()
+    except CommercialLicenseDenied:
+        raise
+    except ImportError:
+        pass  # early bootstrap / partial tree
+    except Exception:
+        from django.conf import settings
+        if getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False):
+            raise
+
     data_bytes = json.dumps(data).encode('utf-8')
     key = get_key()
     iv = os.urandom(16)
