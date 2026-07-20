@@ -65,6 +65,9 @@ if not ALLOWED_HOSTS:
 CSRF_TRUSTED_ORIGINS = [
     'http://localhost:8000',
     'http://127.0.0.1:8000',
+    # Dev SPA (Next.js) on :3000 talking to API on :8000 with credentials/cookies.
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
 ]
 # LAN access over plain HTTP needs the server's own origin(s) trusted for admin POSTs.
 CSRF_TRUSTED_ORIGINS += [o for o in os.getenv('CSRF_TRUSTED_ORIGINS', '').split(',') if o]
@@ -233,13 +236,22 @@ LATEST_CLIENT_VERSION = os.getenv('LATEST_CLIENT_VERSION', '1.3.13')
 
 
 
-if DEBUG:
-    CORS_ALLOW_ALL_ORIGINS = True
-else:
-    CORS_ALLOWED_ORIGINS = [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ]
+# SPA uses fetch(..., { credentials: "include" }) for session + CSRF cookies.
+# Browsers REJECT Access-Control-Allow-Origin: * when credentials are included —
+# never use CORS_ALLOW_ALL_ORIGINS with credentialed requests.
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    o for o in os.getenv(
+        "CORS_ALLOWED_ORIGINS",
+        "http://localhost:3000,http://127.0.0.1:3000",
+    ).split(",")
+    if o.strip()
+]
+# Production same-origin static UI does not need CORS; keep localhost for LAN
+# admin tools if someone points a separate origin at the appliance.
+if not DEBUG:
+    # Allow extra origins from env only; do not fall back to wildcard.
+    pass
 
 # Allow the SPA's custom language header through CORS preflight (cross-origin dev only;
 # the shipped static export is same-origin). 'x-lang' selects the API message language.
