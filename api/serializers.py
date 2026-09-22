@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from drf_spectacular.utils import extend_schema_field
 from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute
 
 
@@ -33,6 +34,7 @@ class LabelTemplatesSerializer(serializers.ModelSerializer):
         model = LabelTemplates
         fields = ['id', 'name', 'scheme', 'structure', 'created_at', 'updated_at']
 
+    @extend_schema_field(serializers.CharField())
     def get_structure(self, obj):
         # We store it as JSONField in DB, so obj.scheme is already an object.
         # We dump it to string for the Electron client.
@@ -88,6 +90,7 @@ class LabelsStationsSerializer(serializers.ModelSerializer):
         model = LabelsStations
         fields = '__all__'
 
+    @extend_schema_field(serializers.CharField(allow_null=True))
     def get_station_number(self, obj):
         if obj.station_number is not None:
             return f"{obj.station_number:02d}"
@@ -112,4 +115,18 @@ class GlobalProductAttributeSerializer(serializers.ModelSerializer):
     class Meta:
         model = GlobalProductAttribute
         fields = '__all__'
+
+
+class FullSyncResponseSerializer(serializers.Serializer):
+    barcodes = BarcodeTemplateSerializer(many=True)
+    labels = LabelTemplatesSerializer(many=True)
+    containers = PackSerializer(many=True)
+    nomenclature = NomenclatureSerializer(many=True)
+    packs = serializers.ListField(child=serializers.DictField())
+
+
+class VersionInfoSerializer(serializers.Serializer):
+    server_version = serializers.CharField()
+    min_client_version = serializers.CharField()
+    latest_client_version = serializers.CharField()
 

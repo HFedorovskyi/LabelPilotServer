@@ -2,6 +2,7 @@ from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
+from drf_spectacular.utils import extend_schema
 from django.conf import settings
 from api.serializers import (
     NomenclatureSerializer, 
@@ -10,7 +11,9 @@ from api.serializers import (
     BarcodeTemplateSerializer, 
     LabelsStationsSerializer,
     ProductPackLinkSerializer,
-    GlobalProductAttributeSerializer
+    GlobalProductAttributeSerializer,
+    FullSyncResponseSerializer,
+    VersionInfoSerializer,
 )
 
 from Nomenclature.models import Nomenclature, ProductPackLink, GlobalProductAttribute
@@ -119,6 +122,10 @@ from rest_framework.views import APIView
 class FullSyncView(APIView):
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        summary='Download all station data',
+        responses=FullSyncResponseSerializer,
+    )
     def get(self, request):
         barcodes = BarcodeTemplateSerializer(BarcodeTemplate.objects.all(), many=True).data
         labels = LabelTemplatesSerializer(LabelTemplates.objects.all(), many=True).data
@@ -143,6 +150,10 @@ class VersionView(APIView):
     """
     permission_classes = [AllowAny]
 
+    @extend_schema(
+        summary='Get server and supported client versions',
+        responses=VersionInfoSerializer,
+    )
     def get(self, request):
         from django.conf import settings
         from pathlib import Path

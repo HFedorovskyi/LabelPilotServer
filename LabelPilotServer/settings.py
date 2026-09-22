@@ -29,9 +29,20 @@ SECRET_KEY = 'django-insecure-$dvt5e#6-s3$-#7o-veoyuwl5%p3m3q52sd8)lk50p*mogmbbz
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',')
+def _configured_hosts(*variable_names):
+    hosts = []
+    for variable_name in variable_names:
+        hosts.extend(
+            host.strip()
+            for host in os.getenv(variable_name, '').split(',')
+            if host.strip()
+        )
+    return hosts
 
-ALLOWED_HOSTS += os.getenv("EXTRA_ALLOWED_HOSTS", "").split(",")
+
+ALLOWED_HOSTS = _configured_hosts('ALLOWED_HOSTS', 'EXTRA_ALLOWED_HOSTS')
+if DEBUG:
+    ALLOWED_HOSTS.extend(['localhost', '127.0.0.1'])
 # Application definition
 
 CSRF_TRUSTED_ORIGINS = [
@@ -203,6 +214,6 @@ REST_FRAMEWORK = {
 SPECTACULAR_SETTINGS = {
     'TITLE': 'LabelPilot API',
     'DESCRIPTION': 'API for LabelPilot application',
-    'VERSION': '1.0.3',
+    'VERSION': VERSION,
     'SERVE_INCLUDE_SCHEMA': False,
 }
