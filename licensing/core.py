@@ -29,6 +29,8 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
+from .clock import GRACE_DAYS, read_clock
+
 # Ed25519 public key (hex of the 32-byte raw key). Production key (2026) — must match the desktop
 # client (encryption.ts LICENSE_PUBLIC_KEY_HEX) and the LABELPILOT_LICENSE_PUBLIC_KEY used to sign.
 LICENSE_PUBLIC_KEY_HEX = "bd770682b1bef5aa9c081320dad25e7e1c81752e357bdeb36d9016b4afe45e56"
@@ -86,6 +88,7 @@ class License:
     token: str                    # the raw license-file token (b64url(payload).b64url(sig))
 
     def is_expired(self, today: Optional[datetime.date] = None) -> bool:
+        """Past the expiry date (the grace period may still be running)."""
         if not self.expires:
             return False
         try:
@@ -93,6 +96,23 @@ class License:
         except (ValueError, TypeError):
             return True  # malformed expiry -> fail safe (treat as expired)
         return (today or _today_utc()) > exp
+
+    def grace_until(self) -> Optional[datetime.date]:
+        """Last day the commercial gates still accept an expired subscription."""
+        if not self.expires:
+            return None
+        try:
+            return datetime.date.fromisoformat(self.expires) + datetime.timedelta(days=GRACE_DAYS)
+        except (ValueError, TypeError):
+            return None
+
+    def is_past_grace(self, today: Optional[datetime.date] = None) -> bool:
+        """Expired AND the grace period is over: exports and new seats stop.
+        Printing on the stations never stops (no kill switch on production lines)."""
+        if not self.is_expired(today):
+            return False
+        until = self.grace_until()
+        return until is None or (today or _today_utc()) > until
 
 
 def _license_path() -> Path:
@@ -242,8 +262,15 @@ class LicenseState:
     present: bool          # a license.lpl file exists
     signature_valid: bool  # Ed25519 signature verified
     machine_ok: bool       # license is unbound, or bound to THIS machine
-    expired: bool          # past its expiry date
+    expired: bool          # past its expiry date (judged at the trusted clock)
     license: Optional[License]  # the parsed License when signature_valid, else None
+    past_grace: bool = False      # expired and the GRACE_DAYS grace period is over
+    clock_rollback: bool = False  # the OS clock was turned back (see licensing.clock)
+    today: Optional[datetime.date] = None  # the trusted date the facts above were judged at
+
+    @property
+    def in_grace(self) -> bool:
+        return self.expired and not self.past_grace
 
     @property
     def valid_for_key(self) -> bool:
@@ -262,7 +289,26 @@ def license_state() -> LicenseState:
     """The SINGLE source of truth for license validity. Parses + verifies once per
     (mtime_ns, size) and caches, reporting present / signature_valid / machine_ok /
     expired as INDEPENDENT facts. get_key(), seat_available() and the UI all read this,
-    so they can never diverge (the old bug: get_key ignored expiry, seat_available didn't)."""
+    so they can never diverge (the old bug: get_key ignored expiry, seat_available didn't).
+
+    Expiry is judged on every call at the trusted clock (licensing.clock), never
+    cached with the parse: a server running across its expiry date sees it."""
+    parsed = _parsed_license()
+    lic = parsed.license
+    if lic is None:
+        return parsed
+    reading = read_clock(lic.issued)
+    today = reading.today
+    return LicenseState(
+        present=parsed.present, signature_valid=parsed.signature_valid,
+        machine_ok=parsed.machine_ok, license=lic,
+        expired=lic.is_expired(today), past_grace=lic.is_past_grace(today),
+        clock_rollback=reading.rollback, today=today,
+    )
+
+
+def _parsed_license() -> LicenseState:
+    """Parse + verify license.lpl once per (mtime_ns, size); date facts are left unset."""
     path = _license_path()
     try:
         st = path.stat() if path.exists() else None
@@ -280,14 +326,12 @@ def license_state() -> LicenseState:
     present = cache_key is not None
     sig_ok = False
     machine_ok = True
-    expired = False
     lic = None
     if present:
         try:
             lic = _verify_and_parse(path.read_text(encoding="utf-8"))
             sig_ok = True
             machine_ok = lic.machine_id == machine_id()
-            expired = lic.is_expired()
         except (InvalidSignature, ValueError, TypeError, json.JSONDecodeError, OSError):
             # Present but forged / corrupt / unparseable -> fail CLOSED (sig_ok stays
             # False). We deliberately do NOT serve a previously-cached good license: a
@@ -298,7 +342,7 @@ def license_state() -> LicenseState:
 
     state = LicenseState(
         present=present, signature_valid=sig_ok, machine_ok=machine_ok,
-        expired=expired, license=lic if sig_ok else None,
+        expired=False, license=lic if sig_ok else None,
     )
     with _cache_lock:
         _cached_state = (cache_key, state)
@@ -361,24 +405,40 @@ def seat_available(current_count: int) -> bool:
         return True
     if not st.valid_for_key:      # present but bad signature
         return False
-    if st.expired or not st.machine_ok:
+    if st.past_grace or not st.machine_ok:
         return False
     return st.license.max_stations is None or current_count < st.license.max_stations
 
 
 def license_status() -> dict:
-    """Machine-readable status for the UI / a /license endpoint."""
-    lic = load_license()
+    """Machine-readable status for the UI / a /license endpoint.
+
+    ``expired`` = the expiry date has passed; ``grace`` = it has, but the grace
+    period still runs until ``grace_until``; ``days_left`` counts to the expiry
+    date (or, in grace, to the end of the grace period)."""
+    st = license_state()
+    lic = st.license if (st.valid_for_key and st.machine_ok) else None
     if lic is None:
         return {
             "licensed": False, "mode": "demo", "edition": "demo",
             "customer": None, "expires": None, "expired": False,
+            "grace": False, "grace_until": None, "days_left": None, "clock_rollback": False,
             "max_stations": None, "demo_max_stations": None,
             "license_id": None, "machine_id": machine_id(),
         }
+    grace_until = lic.grace_until()
+    days_left = None
+    if lic.expires and st.today is not None:
+        try:
+            target = grace_until if st.in_grace else datetime.date.fromisoformat(lic.expires)
+            days_left = max(0, (target - st.today).days)
+        except (TypeError, ValueError):
+            days_left = 0
     return {
         "licensed": True, "mode": "licensed", "edition": lic.edition, "customer": lic.customer,
-        "expires": lic.expires, "expired": lic.is_expired(),
+        "expires": lic.expires, "expired": st.expired,
+        "grace": st.in_grace, "grace_until": grace_until.isoformat() if grace_until else None,
+        "days_left": days_left, "clock_rollback": st.clock_rollback,
         "max_stations": lic.max_stations, "demo_max_stations": None,
         "license_id": lic.license_id, "features": lic.features, "machine_id": machine_id(),
     }

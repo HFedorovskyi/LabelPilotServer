@@ -15,6 +15,7 @@ from api.views import (
     VersionView,
     LicenseView,
     LicenseImportView,
+    LicenseRefreshView,
 )
 from api.statistics_views import StatisticsView, StationLabelsView
 from api.search_views import SearchView, NotificationsView
@@ -55,5 +56,6 @@ urlpatterns = [
     path('version/', VersionView.as_view(), name='version'),
     path('license/', LicenseView.as_view(), name='license'),
     path('license/import/', LicenseImportView.as_view(), name='license-import'),
+    path('license/refresh/', LicenseRefreshView.as_view(), name='license-refresh'),
     path('', include(router.urls)),
 ]

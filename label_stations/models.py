@@ -24,6 +24,22 @@ class LabelsStations(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
     changed_at = models.DateTimeField(auto_now=True, null=True)
 
+    # Named-seat licensing (licensing/seats.py). Existing stations keep their seat.
+    SEAT_CHOICES = (
+        ('active', 'Место выдано'),
+        ('pending', 'Ожидает места'),
+        ('released', 'Место освобождено'),
+    )
+    seat_state = models.CharField(
+        max_length=16, choices=SEAT_CHOICES, default='active', db_index=True,
+        verbose_name='Лицензионное место',
+    )
+    seat_changed_at = models.DateTimeField(null=True, blank=True)
+    # Hardware fingerprint the station reported first (32 hex), and the last
+    # different device that announced the same identity.
+    station_fingerprint = models.CharField(max_length=32, blank=True, default='')
+    conflict_fingerprint = models.CharField(max_length=32, blank=True, default='')
+
     def save(self, *args, **kwargs):
         if self.station_number is None:
             # Find the smallest available number from 1 to 99
@@ -39,6 +55,26 @@ class LabelsStations(models.Model):
 
     def __str__(self):
         return f"[{self.station_number:02d}] {self.station_name}" if self.station_number else self.station_name
+
+
+class SeatEvent(models.Model):
+    """Audit trail of seat assignments, releases and hardware changes. Releases
+    within the last 30 days are rate limited (licensing/seats.py)."""
+    station = models.ForeignKey(
+        'LabelsStations', null=True, blank=True, on_delete=models.SET_NULL, related_name='seat_events',
+    )
+    station_uuid = models.UUIDField(null=True, blank=True)
+    station_name = models.CharField(max_length=100, blank=True, default='')
+    event = models.CharField(max_length=32, db_index=True)
+    actor = models.CharField(max_length=150, blank=True, default='')
+    detail = models.CharField(max_length=255, blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+
+    class Meta:
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.created_at:%Y-%m-%d %H:%M} {self.event} {self.station_name}"
 
 
 class Operator(models.Model):

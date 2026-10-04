@@ -34,6 +34,7 @@ _EVENT_COOLDOWN = {
     "boot": 6 * 60 * 60,
     "license_activated": 60,          # allow a few retries
     "export_denied": 5 * 60,          # full log, but not every click
+    "clock_rollback": 6 * 60 * 60,    # the server clock was turned back (licensing.clock)
     "encrypt_denied": 5 * 60,
     "unlicensed_use": 5 * 60,
 }
@@ -100,10 +101,28 @@ def build_status_fields() -> dict:
         "signature_valid": bool(st.signature_valid),
         "machine_ok": bool(st.machine_ok),
         "expired": bool(st.expired),
+        "grace": bool(st.in_grace),
+        "clock_rollback": bool(st.clock_rollback),
         "commercial_ok": bool(ok),
         "reason": reason if not ok else None,
         "app_version": str(getattr(settings, "VERSION", "") or ""),
+        "edition": lic.edition if lic else None,
+        "expires": lic.expires if lic else None,
+        "seats": _seat_fields(),
     }
+
+
+def _seat_fields() -> dict:
+    """Seat counts only: no station names, addresses or fingerprints leave the site."""
+    try:
+        from licensing.seats import summary
+
+        seats = summary()
+        return {key: seats[key] for key in (
+            "limit", "active", "pending", "fingerprinted", "conflicts", "over_limit", "releases_30d",
+        )}
+    except Exception:
+        return {}
 
 
 def send_event(
@@ -187,10 +206,12 @@ def _heartbeat_loop(first_delay_sec: float) -> None:
         send_event("boot", force=False)
     except Exception:
         pass
+    _refresh_license()
     # Spread first daily pulse ~24h after boot (boot already covered "today").
     while True:
         try:
             time.sleep(_HEARTBEAT_INTERVAL_SEC)
+            _refresh_license()
             if not _enabled():
                 continue
             send_event("heartbeat", force=False)
@@ -200,6 +221,15 @@ def _heartbeat_loop(first_delay_sec: float) -> None:
                 time.sleep(60)
             except Exception:
                 return
+
+
+def _refresh_license() -> None:
+    """Daily: install a renewed licence from the sales service (own opt-out flag)."""
+    try:
+        from licensing.refresh import refresh_quietly
+        refresh_quietly()
+    except Exception:
+        pass
 
 
 def schedule_install_report(delay_sec: float = 8.0) -> None:
@@ -234,6 +264,10 @@ def report_export_denied(reason: str = "missing", detail: str = "export") -> Non
 
 def report_encrypt_denied(reason: str = "missing") -> None:
     report_event_async("encrypt_denied", reason=reason, detail="encrypt_data")
+
+
+def report_clock_rollback(detail: str = "") -> None:
+    report_event_async("clock_rollback", reason="clock_rollback", detail=detail)
 
 
 def report_unlicensed_use(detail: str = "") -> None:

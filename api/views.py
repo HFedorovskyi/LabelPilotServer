@@ -33,6 +33,7 @@ import json
 import requests
 from common.utils import get_local_ip
 from api.i18n import tr
+from django.core.exceptions import ValidationError as DjangoValidationError
 
 
 def _require_license_for_export():
@@ -48,6 +49,39 @@ def _require_license_for_export():
     """
     from licensing.enforcement import require_export_or_http
     require_export_or_http()
+
+
+def _require_station_seat(station):
+    """Station data only goes to a station holding an active licence seat."""
+    from licensing import seats
+    try:
+        seats.ensure_may_receive_data(station)
+    except seats.SeatError as error:
+        raise _seat_denied(error)
+
+
+def _station_license_token():
+    """The signed license token for a station, or None without a valid commercial
+    license (the same gate as every data export)."""
+    from licensing.core import load_license
+    from licensing.enforcement import commercial_license_ok
+    ok, _reason = commercial_license_ok()
+    if not ok:
+        return None
+    lic = load_license()
+    return lic.token if lic is not None else None
+
+
+def _seat_denied(error):
+    from rest_framework.exceptions import PermissionDenied
+    return PermissionDenied(tr(error.code))
+
+
+def _actor(request):
+    user = getattr(request, 'user', None)
+    if user is None or not user.is_authenticated:
+        return ''
+    return user.get_username()
 
 
 class ProductPackLinkViewSet(viewsets.ModelViewSet):
@@ -376,39 +410,60 @@ class LicenseView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
-        from django.conf import settings
-        from licensing import license_status, license_state, commercial_license_ok
-        data = dict(license_status())
-        st = license_state()
-        # Surfaced separately so the admin UI can tell "bound to a different machine"
-        # apart from "no license" (license_status() reports a wrong-machine license as
-        # unlicensed). `strict` reflects the effective fail-closed posture.
-        data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) or not bool(getattr(settings, 'DEBUG', False))
-        data['signature_valid'] = st.signature_valid
-        data['machine_ok'] = st.machine_ok
-        data['stations_used'] = LabelsStations.objects.count()
-        ok, reason = commercial_license_ok()
-        data['commercial_ok'] = ok
-        data['commercial_reason'] = reason
-        try:
-            from licensing.integrity import integrity_status
-            data['integrity'] = integrity_status()
-        except Exception:
-            data['integrity'] = {'integrity_ok': None}
-        try:
-            from licensing.native_guard import native_guard_status
-            guard = native_guard_status()
-            data['native_guard'] = {
-                'available': guard.get('available'),
-                'ok': guard.get('ok'),
-                'reason': guard.get('reason'),
-            }
-        except Exception:
-            data['native_guard'] = {'available': False, 'ok': False, 'reason': 'native_guard'}
-        return Response(data)
+        return Response(_license_payload())
+
+
+def _license_payload():
+    """Licence status + seats + verifier facts (status, import and refresh views)."""
+    from django.conf import settings
+    from licensing import license_status, license_state, commercial_license_ok
+    data = dict(license_status())
+    st = license_state()
+    # Surfaced separately so the admin UI can tell "bound to a different machine"
+    # apart from "no license" (license_status() reports a wrong-machine license as
+    # unlicensed). `strict` reflects the effective fail-closed posture.
+    data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) or not bool(getattr(settings, 'DEBUG', False))
+    data['signature_valid'] = st.signature_valid
+    data['machine_ok'] = st.machine_ok
+    from licensing.seats import summary as seat_summary
+    data['seats'] = seat_summary()
+    data['stations_used'] = data['seats']['active']
+    ok, reason = commercial_license_ok()
+    data['commercial_ok'] = ok
+    data['commercial_reason'] = reason
+    try:
+        from licensing.integrity import integrity_status
+        data['integrity'] = integrity_status()
+    except Exception:
+        data['integrity'] = {'integrity_ok': None}
+    try:
+        from licensing.native_guard import native_guard_status
+        guard = native_guard_status()
+        data['native_guard'] = {
+            'available': guard.get('available'),
+            'ok': guard.get('ok'),
+            'reason': guard.get('reason'),
+        }
+    except Exception:
+        data['native_guard'] = {'available': False, 'ok': False, 'reason': 'native_guard'}
+    return data
 
 
 from api.permissions import IsAdmin as _IsAdmin
+
+
+class LicenseRefreshView(APIView):
+    """Admin-only: ask the LabelPilot sales service for a renewed licence now
+    (the server also checks once a day when online).
+    POST /api/v1/license/refresh/ -> licence payload + {"refresh": {status, detail}}."""
+    permission_classes = [_IsAdmin]
+
+    def post(self, request):
+        from licensing.refresh import refresh_license
+        result = refresh_license()
+        data = _license_payload()
+        data['refresh'] = {'status': result.status, 'detail': result.detail}
+        return Response(data)
 
 
 class LicenseImportView(APIView):
@@ -420,8 +475,8 @@ class LicenseImportView(APIView):
     permission_classes = [_IsAdmin]
 
     def post(self, request):
-        from licensing.core import _verify_and_parse, _license_path, license_status
-        from licensing import license_state
+        from licensing.core import _verify_and_parse
+        from licensing.refresh import install_license_token
 
         raw = None
         f = request.FILES.get('file')
@@ -441,15 +496,11 @@ class LicenseImportView(APIView):
             return Response({'detail': tr('license.importInvalid')}, status=status.HTTP_400_BAD_REQUEST)
 
         try:
-            _license_path().write_text(raw, encoding='utf-8')
+            install_license_token(raw)  # atomic replace
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        data = dict(license_status())
-        st = license_state()
-        data['signature_valid'] = st.signature_valid
-        data['machine_ok'] = st.machine_ok
-        data['stations_used'] = LabelsStations.objects.count()
+        data = _license_payload()
         # Notify sales service: license file installed on this machine (async, optional).
         try:
             from licensing.telemetry import report_license_activated
@@ -464,11 +515,11 @@ class StationsViewSet(viewsets.ModelViewSet):
     serializer_class = LabelsStationsSerializer
     lookup_field = 'station_uuid'
 
-    # Station/handshake endpoints stay OPEN (stations have no user session) — gated by
-    # license (_require_license_for_export) + the LAN boundary, not user auth. Everything
-    # else (station CRUD, send-to-station) inherits closed-by-default IsAuthenticated.
-    _PUBLIC_ACTIONS = {"ping", "server_ip", "full_dump", "upload_report",
-                       "download_identity", "download_update", "sync_data"}
+    # Only what stations themselves call stays OPEN (stations have no user session):
+    # ping and report upload. Pushing or downloading a station's data set is an admin
+    # action from the web UI, so it inherits closed-by-default IsAuthenticated — an
+    # anonymous LAN host can no longer fetch a full data set by station UUID.
+    _PUBLIC_ACTIONS = {"ping", "server_ip", "upload_report"}
 
     def get_permissions(self):
         from rest_framework.permissions import AllowAny
@@ -477,12 +528,62 @@ class StationsViewSet(viewsets.ModelViewSet):
         return super().get_permissions()
 
     def perform_create(self, serializer):
-        # Seat limit applies only to an over-cap or invalid license; no license = unlimited.
-        from licensing import seat_available
+        # A station over the licence's seat cap is registered as "pending": it is
+        # visible to the admin but receives no data until a seat is free.
+        from django.utils import timezone as tz
         from rest_framework.exceptions import ValidationError
-        if not seat_available(LabelsStations.objects.count()):
+        from licensing import seats
+        state = seats.initial_state()
+        if state is None:
             raise ValidationError({"license": tr('station.seatLimitReached')})
-        serializer.save()
+        station = serializer.save(seat_state=state, seat_changed_at=tz.now())
+        seats.record_registration(station, actor=_actor(self.request))
+
+    def perform_destroy(self, instance):
+        # Deleting an active station frees its seat and spends a release.
+        from licensing import seats
+        try:
+            seats.delete(instance, actor=_actor(self.request))
+        except seats.SeatError as error:
+            raise _seat_denied(error)
+
+    def _seat_action(self, operation):
+        from licensing import seats
+        station = self.get_object()
+        try:
+            operation(station, actor=_actor(self.request))
+        except seats.SeatError as error:
+            raise _seat_denied(error)
+        station.refresh_from_db()
+        return Response(self.get_serializer(station).data)
+
+    @action(detail=True, methods=['post'], permission_classes=[_IsAdmin])
+    def release_seat(self, request, station_uuid=None):
+        from licensing import seats
+        return self._seat_action(seats.release)
+
+    @action(detail=True, methods=['post'], permission_classes=[_IsAdmin])
+    def activate_seat(self, request, station_uuid=None):
+        from licensing import seats
+        return self._seat_action(seats.activate)
+
+    @action(detail=True, methods=['post'], permission_classes=[_IsAdmin])
+    def replace_hardware(self, request, station_uuid=None):
+        from licensing import seats
+        return self._seat_action(seats.replace_hardware)
+
+    @action(detail=False, methods=['get'])
+    def seat_events(self, request):
+        from label_stations.models import SeatEvent
+        events = SeatEvent.objects.all()[:200]
+        return Response([{
+            'station_uuid': str(event.station_uuid) if event.station_uuid else None,
+            'station_name': event.station_name,
+            'event': event.event,
+            'actor': event.actor,
+            'detail': event.detail,
+            'created_at': event.created_at,
+        } for event in events])
 
 
     def _gather_sync_data(self, station, sync_type='UPDATE'):
@@ -493,6 +594,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         # Third dispersed gate: even if a caller forgot _require_license_for_export(),
         # assembling a real sync payload still demands a commercial license.
         _require_license_for_export()
+        _require_station_seat(station)
 
         import datetime
         from common.utils import get_local_ip
@@ -669,6 +771,11 @@ class StationsViewSet(viewsets.ModelViewSet):
             station = LabelsStations.objects.filter(station_uuid=station_uuid).first() if station_uuid else None
         except (ValueError, DjangoValidationError):
             station = None
+        if station is not None:
+            # Production records are always kept (traceability); the reporting device
+            # is only observed so a cloned identity shows up as a conflict.
+            from licensing import seats
+            seats.observe_fingerprint(station, data.get('station_fingerprint'), 'report')
 
         labels_data = [it for it in (data.get('printed_labels') or []) if it.get('unique_id')]
         deleted_data = [it for it in (data.get('deleted_labels') or []) if it.get('unique_id')]
@@ -804,26 +911,48 @@ class StationsViewSet(viewsets.ModelViewSet):
         """
         from django.utils import timezone
         from django.conf import settings
+        from licensing import seats
         station_uuid = request.query_params.get('station_uuid')
         message = "Pong"
-        
+        seat = None
+        license_token = None
+
         if station_uuid:
             try:
                 station = LabelsStations.objects.get(station_uuid=station_uuid)
-                station.is_online = True
-                station.save(update_fields=['is_online', 'changed_at'])
-                message = f"Pong, station {station.station_name} updated"
-            except (LabelsStations.DoesNotExist, ValueError, TypeError):
+                fingerprint = seats.observe_fingerprint(
+                    station, request.query_params.get('fingerprint'), 'ping',
+                )
+                # A second device reusing this identity never marks it online.
+                if fingerprint != seats.FINGERPRINT_CONFLICT:
+                    station.is_online = True
+                    station.save(update_fields=['is_online', 'changed_at'])
+                    message = f"Pong, station {station.station_name} updated"
+                seat = seats.station_seat(station, fingerprint)
+                # A station that reports no vendor token (lost file, never synced) prints
+                # DEMO-marked labels; one whose token is expiring asks for the renewal
+                # (license=refresh). It gets the same public, signed token every LPI2
+                # push embeds — only on its bound hardware, with an active seat, and
+                # only while this server holds a valid commercial license.
+                if (request.query_params.get('license') in ('none', 'refresh')
+                        and fingerprint == seats.FINGERPRINT_MATCH
+                        and seat['state'] == seats.SEAT_ACTIVE):
+                    license_token = _station_license_token()
+            except (LabelsStations.DoesNotExist, ValueError, TypeError, DjangoValidationError):
                 pass
-                
-        return Response({
+
+        response = {
+            'seat': seat,
             'status': 'online',
             'server_time': timezone.now(),
             'message': message,
             'server_version': settings.VERSION,
             'min_client_version': settings.MIN_CLIENT_VERSION,
             'latest_client_version': settings.LATEST_CLIENT_VERSION,
-        })
+        }
+        if license_token:
+            response['license_token'] = license_token
+        return Response(response)
 
     @action(detail=False, methods=['get'])
     def full_dump(self, request):
@@ -887,6 +1016,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         _require_license_for_export()
         job = self.get_object()
         station = job.station
+        _require_station_seat(station)
 
         if not station.station_ip:
             job.status = 'error'
@@ -936,6 +1066,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         import datetime
 
         job = self.get_object()
+        _require_station_seat(job.station)
         data = {
             'type': 'PRINT_JOB',
             'jobs': [{
@@ -981,7 +1112,9 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         import datetime
 
         station_id = request.query_params.get('station_id')
-        qs = PrintJob.objects.filter(status='pending').select_related('station', 'nomenclature')
+        qs = PrintJob.objects.filter(
+            status='pending', station__seat_state='active',
+        ).select_related('station', 'nomenclature')
         if station_id:
             qs = qs.filter(station_id=station_id)
 

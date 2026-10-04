@@ -99,6 +99,16 @@ def _decode_result(completed: subprocess.CompletedProcess[str]) -> NativeGuardRe
     return NativeGuardResult(True, False, "native_guard", detail)
 
 
+def _trusted_date() -> str:
+    try:
+        from .core import license_state
+
+        today = license_state().today
+        return today.isoformat() if today else ""
+    except Exception:
+        return ""
+
+
 def verify_license_native(force_reload: bool = False) -> NativeGuardResult:
     """Verify signed build + installed license in the native process.
 
@@ -110,7 +120,8 @@ def verify_license_native(force_reload: bool = False) -> NativeGuardResult:
     executable = guard_executable()
     manifest = root / "licensing" / "_fingerprint.lpf"
     license_path = root / "license.lpl"
-    key = _cache_key(executable, manifest, license_path)
+    not_before = _trusted_date()
+    key = _cache_key(executable, manifest, license_path) + (not_before,)
     now = time.monotonic()
     if (
         not force_reload
@@ -141,6 +152,10 @@ def verify_license_native(force_reload: bool = False) -> NativeGuardResult:
         str(license_path),
         "--json",
     ]
+    if not_before:
+        # The licence clock mark (licensing.clock): turning the OS clock back
+        # must not make the native verifier accept an expired licence again.
+        command += ["--not-before", not_before]
     creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     try:
         completed = subprocess.run(

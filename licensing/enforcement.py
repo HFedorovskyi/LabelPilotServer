@@ -111,7 +111,8 @@ def commercial_license_ok() -> Tuple[bool, str]:
         return False, "bad_signature"
     if not state.machine_ok:
         return False, "wrong_machine"
-    if state.expired:
+    if state.past_grace:
+        # In the grace period exports keep working; the UI shows the deadline.
         return False, "expired"
 
     from .core import load_license

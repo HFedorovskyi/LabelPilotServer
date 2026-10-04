@@ -139,31 +139,46 @@ class Command(BaseCommand):
         station = None
         if valid_uuid:
             station = LabelsStations.objects.filter(station_uuid=station_id).first()
-        if not station:
-            # Fallback to IP search (also how a non-UUID/demo announce is reconciled).
+        elif ip:
+            # Only an announcement WITHOUT a usable UUID (built-in demo) is reconciled by
+            # IP. A real station with an unknown UUID is a new station: matching it by IP
+            # would merge it into whichever station previously had that DHCP address.
             station = LabelsStations.objects.filter(station_ip=ip).first()
 
+        from licensing import seats
         if station:
+            fingerprint = seats.observe_fingerprint(station, msg.get('fingerprint'), 'discovery')
+            if fingerprint == seats.FINGERPRINT_CONFLICT:
+                # A second device reuses this station's identity (copied data folder):
+                # it never takes over the station's address; the admin sees the conflict.
+                print(f"[LICENSE] Identity conflict for station {station.station_name} from {ip}.")
+                return
             station.station_ip = ip
             station.station_name = name
             station.station_port = port
             station.is_online = True
             station.save()
         else:
-            # Create new -- but only if the seat limit allows it (no license -> unlimited).
-            from licensing import seat_available
-            if not seat_available(LabelsStations.objects.count()):
-                print(f"[LICENSE] Seat limit reached - not registering new station from {ip} ({name}).")
+            # A station over the seat cap is registered as pending (visible to the admin,
+            # no data until a seat is free). No license -> unlimited demo registration.
+            state = seats.initial_state()
+            if state is None:
+                print(f"[LICENSE] Too many stations waiting for a seat - not registering {ip} ({name}).")
                 return
             generated_uuid = station_id if valid_uuid else uuid.uuid4()
+            from django.utils import timezone
             try:
-                LabelsStations.objects.create(
+                created = LabelsStations.objects.create(
                     station_ip=ip,
                     station_name=name,
                     station_port=port,
                     station_uuid=generated_uuid,
-                    is_online=True
+                    is_online=state == seats.SEAT_ACTIVE,
+                    seat_state=state,
+                    seat_changed_at=timezone.now(),
+                    station_fingerprint=seats.valid_fingerprint(msg.get('fingerprint')) or '',
                 )
+                seats.record_registration(created, actor='discovery')
             except Exception as e:
                 print(f"[ERROR] Failed to register station from {ip} ({name}): {e}")
 

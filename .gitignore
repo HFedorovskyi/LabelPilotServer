@@ -21,4 +21,9 @@ celerybeat-schedule
 frontend_dist/
 
 .telemetry_last
+.telemetry_*
+
+# Licence runtime state (licensing/clock.py mark, atomic-write temporaries)
+license-clock.json
+*.tmp
 

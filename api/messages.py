@@ -9,10 +9,28 @@ MESSAGES = {
         "uk": "Демо-режим: експорт даних станції недоступний без дійсної ліцензії. Активуйте ліцензію для розгортання реальних станцій."
     },
     "station.seatLimitReached": {
-        "ru": "Достигнут лимит станций по лицензии (или лицензия недействительна).",
-        "en": "Station license limit reached (or the license is invalid).",
-        "de": "Stationslimit der Lizenz erreicht (oder die Lizenz ist ungültig).",
-        "uk": "Досягнуто ліміту станцій за ліцензією (або ліцензія недійсна)."
+        "ru": "Все места по лицензии заняты (или лицензия недействительна). Освободите место другой станции или докупите места.",
+        "en": "All licensed seats are in use (or the license is invalid). Release another station's seat or buy more seats.",
+        "de": "Alle lizenzierten Plätze sind belegt (oder die Lizenz ist ungültig). Geben Sie den Platz einer anderen Station frei oder erwerben Sie weitere Plätze.",
+        "uk": "Усі місця за ліцензією зайняті (або ліцензія недійсна). Звільніть місце іншої станції або докупіть місця."
+    },
+    "station.seatNotActive": {
+        "ru": "У станции нет места по лицензии: данные ей не передаются.",
+        "en": "This station holds no licensed seat: no data is sent to it.",
+        "de": "Diese Station hat keinen lizenzierten Platz: Es werden keine Daten an sie gesendet.",
+        "uk": "Станція не має місця за ліцензією: дані їй не передаються."
+    },
+    "station.seatReleaseLimit": {
+        "ru": "Исчерпан лимит освобождения мест за 30 дней. При массовой замене оборудования обратитесь к поставщику.",
+        "en": "The 30-day seat release allowance is used up. Contact your supplier when replacing hardware in bulk.",
+        "de": "Das Kontingent für Platzfreigaben der letzten 30 Tage ist ausgeschöpft. Wenden Sie sich bei größerem Hardwaretausch an Ihren Lieferanten.",
+        "uk": "Вичерпано ліміт звільнення місць за 30 днів. У разі масової заміни обладнання зверніться до постачальника."
+    },
+    "station.noHardwareConflict": {
+        "ru": "Для этой станции не обнаружено другое оборудование.",
+        "en": "No other hardware has been detected for this station.",
+        "de": "Für diese Station wurde keine andere Hardware erkannt.",
+        "uk": "Для цієї станції не виявлено іншого обладнання."
     },
     "station.noIp": {
         "ru": "У станции не указан IP адрес",
