@@ -428,6 +428,11 @@ def _license_payload():
     from licensing.seats import summary as seat_summary
     data['seats'] = seat_summary()
     data['stations_used'] = data['seats']['active']
+    try:
+        from licensing.seat_list import status as seat_list_status
+        data['seat_list'] = seat_list_status()
+    except Exception:
+        data['seat_list'] = {'required': False}
     ok, reason = commercial_license_ok()
     data['commercial_ok'] = ok
     data['commercial_reason'] = reason
@@ -461,9 +466,79 @@ class LicenseRefreshView(APIView):
     def post(self, request):
         from licensing.refresh import refresh_license
         result = refresh_license()
+        if result.status == 'updated':
+            from licensing.seat_list import schedule_sync
+            schedule_sync(0.5)  # a licence that now uses a seat list gets one at once
         data = _license_payload()
         data['refresh'] = {'status': result.status, 'detail': result.detail}
         return Response(data)
+
+
+class LicenseSeatListView(APIView):
+    """Admin-only: the vendor-signed seat list (licences with the "seat-list" feature).
+    GET  /api/v1/license/seat-list/          -> licence payload (incl. "seat_list")
+    POST /api/v1/license/seat-list/          -> ask the sales service for a fresh list now
+    The server also renews it daily and a few seconds after every seat change."""
+    permission_classes = [_IsAdmin]
+
+    def get(self, request):
+        return Response(_license_payload())
+
+    def post(self, request):
+        from licensing.seat_list import sync
+        result = sync()
+        data = _license_payload()
+        data['seat_list_sync'] = {'status': result.status, 'detail': result.detail}
+        return Response(data)
+
+
+class LicenseSeatListRequestView(APIView):
+    """Admin-only: the request file an offline site has signed in the customer cabinet.
+    GET /api/v1/license/seat-list/request/ -> JSON attachment."""
+    permission_classes = [_IsAdmin]
+
+    def get(self, request):
+        import json as _json
+        from django.http import HttpResponse
+        from licensing.seat_list import request_document
+        try:
+            document = request_document()
+        except ValueError:
+            return Response({'detail': tr('license.exportDenied')}, status=status.HTTP_409_CONFLICT)
+        response = HttpResponse(
+            _json.dumps(document, indent=2), content_type='application/json',
+        )
+        response['Content-Disposition'] = f'attachment; filename="seat-request-{document["license_id"]}.json"'
+        return response
+
+
+class LicenseSeatListImportView(APIView):
+    """Admin-only: install a seat list signed in the customer cabinet (offline sites).
+    POST /api/v1/license/seat-list/import/  (multipart 'file' OR JSON {token})."""
+    permission_classes = [_IsAdmin]
+
+    def post(self, request):
+        from licensing.seat_list import install
+
+        raw = None
+        f = request.FILES.get('file')
+        if f is not None:
+            try:
+                raw = f.read(5 * 1024 * 1024).decode('utf-8').strip()
+            except Exception:
+                raw = None
+        if not raw:
+            raw = str(request.data.get('token') or '').strip()
+        if not raw:
+            return Response({'detail': tr('license.importNoFile')}, status=status.HTTP_400_BAD_REQUEST)
+        try:
+            install(raw)
+        except ValueError as error:
+            key = 'license.seatListOlder' if 'older' in str(error) else 'license.seatListInvalid'
+            return Response({'detail': tr(key)}, status=status.HTTP_400_BAD_REQUEST)
+        except Exception:
+            return Response({'detail': tr('license.seatListInvalid')}, status=status.HTTP_400_BAD_REQUEST)
+        return Response(_license_payload())
 
 
 class LicenseImportView(APIView):
@@ -499,6 +574,9 @@ class LicenseImportView(APIView):
             install_license_token(raw)  # atomic replace
         except Exception as e:
             return Response({'detail': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        from licensing.seat_list import reset_cache as reset_seat_list, schedule_sync
+        reset_seat_list()
+        schedule_sync(0.5)
 
         data = _license_payload()
         # Notify sales service: license file installed on this machine (async, optional).
@@ -916,6 +994,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         message = "Pong"
         seat = None
         license_token = None
+        seat_list_token = None
 
         if station_uuid:
             try:
@@ -938,6 +1017,11 @@ class StationsViewSet(viewsets.ModelViewSet):
                         and fingerprint == seats.FINGERPRINT_MATCH
                         and seat['state'] == seats.SEAT_ACTIVE):
                     license_token = _station_license_token()
+                # The vendor-signed seat list, so the station can show whether it is
+                # listed (it checks the list in every data push anyway).
+                if fingerprint == seats.FINGERPRINT_MATCH and seat.get('seat_list'):
+                    from licensing.seat_list import push_token
+                    seat_list_token = push_token()
             except (LabelsStations.DoesNotExist, ValueError, TypeError, DjangoValidationError):
                 pass
 
@@ -952,6 +1036,8 @@ class StationsViewSet(viewsets.ModelViewSet):
         }
         if license_token:
             response['license_token'] = license_token
+        if seat_list_token:
+            response['seat_list'] = seat_list_token
         return Response(response)
 
     @action(detail=False, methods=['get'])

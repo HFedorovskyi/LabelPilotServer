@@ -15,6 +15,10 @@ from the stored seat state: only the first ``max_stations`` active stations in
 seat order (who got a seat first keeps it) receive data. Marking more stations
 "active" in the database therefore gains nothing.
 
+A licence with the "seat-list" feature adds a vendor-signed list of the
+stations' fingerprints (licensing/seat_list.py): a station outside the list
+receives no data here, and the stations enforce the same list themselves.
+
 Nothing here stops a working station: a lapsed or reduced licence blocks new
 seats and new data for stations beyond the cap; every station keeps printing
 with the data it already has.
@@ -133,6 +137,17 @@ def _log(station, event: str, actor: str = "", detail: str = "") -> None:
     )
 
 
+def _seats_changed() -> None:
+    """Ask the vendor for a fresh seat list once the change is committed."""
+    def notify():
+        try:
+            from .seat_list import schedule_sync
+            schedule_sync()
+        except Exception:
+            pass
+    transaction.on_commit(notify)
+
+
 def initial_state() -> Optional[str]:
     """Seat state for a newly registered station, or None when even a pending
     registration must be refused (too many stations already waiting)."""
@@ -146,6 +161,7 @@ def initial_state() -> Optional[str]:
 
 def record_registration(station, actor: str = "") -> None:
     _log(station, "assigned" if station.seat_state == SEAT_ACTIVE else "pending", actor)
+    _seats_changed()
 
 
 @transaction.atomic
@@ -159,6 +175,7 @@ def activate(station, actor: str = "") -> None:
     station.seat_changed_at = timezone.now()
     station.save(update_fields=["seat_state", "seat_changed_at", "changed_at"])
     _log(station, "assigned", actor)
+    _seats_changed()
 
 
 @transaction.atomic
@@ -172,6 +189,7 @@ def release(station, actor: str = "") -> None:
     station.seat_changed_at = timezone.now()
     station.save(update_fields=["seat_state", "is_online", "seat_changed_at", "changed_at"])
     _log(station, "released", actor)
+    _seats_changed()
 
 
 @transaction.atomic
@@ -181,6 +199,7 @@ def delete(station, actor: str = "") -> None:
     if station.seat_state == SEAT_ACTIVE:
         _ensure_release_allowed(seat_policy())
         _log(station, "deleted", actor)
+        _seats_changed()
     station.delete()
 
 
@@ -194,6 +213,7 @@ def observe_fingerprint(station, fingerprint, source: str) -> str:
         station.station_fingerprint = fingerprint
         station.save(update_fields=["station_fingerprint", "changed_at"])
         _log(station, "fingerprint_bound", detail=source)
+        _seats_changed()
         return FINGERPRINT_MATCH
     if station.station_fingerprint == fingerprint:
         return FINGERPRINT_MATCH
@@ -219,6 +239,7 @@ def replace_hardware(station, actor: str = "") -> None:
     station.seat_changed_at = timezone.now()
     station.save(update_fields=["station_fingerprint", "conflict_fingerprint", "seat_changed_at", "changed_at"])
     _log(station, "hardware_replaced", actor, detail=f"{previous}->{station.station_fingerprint[:8]}")
+    _seats_changed()
 
 
 def seated_ids(policy: Optional[SeatPolicy] = None) -> Optional[set]:
@@ -249,7 +270,24 @@ def within_cap(station, policy: Optional[SeatPolicy] = None, seated: Optional[se
 
 
 def may_receive_data(station) -> bool:
-    return within_cap(station)
+    try:
+        ensure_may_receive_data(station)
+    except SeatError:
+        return False
+    return True
+
+
+def seat_list_state(station) -> Optional[str]:
+    """listed / unlisted / no_list (no valid vendor list on this server);
+    None when the licence uses no seat list."""
+    from .seat_list import required, valid_list
+
+    if not required():
+        return None
+    value = valid_list()
+    if value is None:
+        return "no_list"
+    return "listed" if value.lists(station.station_fingerprint or "") else "unlisted"
 
 
 def ensure_may_receive_data(station) -> None:
@@ -257,6 +295,9 @@ def ensure_may_receive_data(station) -> None:
         raise SeatError("station.seatNotActive")
     if not within_cap(station):
         raise SeatError("station.seatOverLimit")
+    from .seat_list import station_listed
+    if not station_listed(station):
+        raise SeatError("station.notInSeatList")
 
 
 def station_seat(station, fingerprint_status: Optional[str] = None) -> dict:
@@ -272,6 +313,7 @@ def station_seat(station, fingerprint_status: Optional[str] = None) -> dict:
         or (FINGERPRINT_MATCH if station.station_fingerprint else FINGERPRINT_LEGACY),
         "used": active_count(),
         "limit": policy.limit,
+        "seat_list": seat_list_state(station),
     }
 
 

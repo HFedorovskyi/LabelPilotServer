@@ -154,6 +154,8 @@ class LabelsStationsSerializer(serializers.ModelSerializer):
     station_number = serializers.SerializerMethodField()
     # False for an active station beyond the licence's seat cap: it gets no data.
     seat_within_cap = serializers.SerializerMethodField()
+    # listed / unlisted / no_list for a licence with a vendor seat list, else None.
+    seat_list = serializers.SerializerMethodField()
 
     class Meta:
         model = LabelsStations
@@ -169,6 +171,17 @@ class LabelsStationsSerializer(serializers.ModelSerializer):
         if "seated_ids" not in self.context:
             self.context["seated_ids"] = seats.seated_ids()
         return seats.within_cap(obj, seated=self.context["seated_ids"])
+
+    def get_seat_list(self, obj):
+        from licensing import seat_list
+        if "seat_list" not in self.context:
+            self.context["seat_list"] = (seat_list.required(), seat_list.valid_list())
+        is_required, value = self.context["seat_list"]
+        if not is_required:
+            return None
+        if value is None:
+            return "no_list"
+        return "listed" if value.lists(obj.station_fingerprint or "") else "unlisted"
 
 class NomenclatureSerializer(serializers.ModelSerializer):
     portion_container_name = serializers.CharField(source='portion_container.name', read_only=True)

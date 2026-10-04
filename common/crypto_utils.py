@@ -82,6 +82,16 @@ def encrypt_data(data: dict) -> bytes:
         if bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(getattr(settings, "DEBUG", False)):
             raise
 
+    # Stations of a licence with the "seat-list" feature accept a payload only
+    # with the vendor-signed list naming their hardware (licensing/seat_list.py).
+    try:
+        from licensing.seat_list import push_token
+        seat_list = push_token()
+    except Exception:
+        seat_list = None
+    if seat_list and isinstance(data, dict):
+        data = {**data, "seat_list": seat_list}
+
     data_bytes = json.dumps(data).encode('utf-8')
     key = get_key()
     iv = os.urandom(16)

@@ -1,5 +1,5 @@
-"""Subscription grace, the trusted licence clock and licence refresh
-(licensing/core.py, clock.py, refresh.py)."""
+"""Subscription grace, the trusted licence clock, licence refresh and the
+vendor-signed seat list (licensing/core.py, clock.py, refresh.py, seat_list.py)."""
 import contextlib
 import datetime
 import json
@@ -14,7 +14,7 @@ from django.contrib.auth import get_user_model
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from licensing import clock, core, refresh
+from licensing import clock, core, refresh, seat_list
 from licensing.core import b64url_encode
 from licensing.native_guard import NativeGuardResult
 
@@ -274,3 +274,192 @@ class RefreshTests(LicenceTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["refresh"]["status"], refresh.NOT_FOUND)
         self.assertEqual(response.json()["license_id"], "LP-TEST-0001")
+
+
+FIXTURE = json.loads((Path(__file__).resolve().parent / "fixtures" / "seat-list-contract.json").read_text(encoding="utf-8"))
+FP_A, FP_B, FP_C = "1" * 32, "2" * 32, "3" * 32
+
+
+def seat_list_token(key=VENDOR_KEY, **overrides):
+    payload = {
+        "expires": "2027-01-03", "issued": "2026-10-05T08:30:00Z", "kind": seat_list.SEAT_LIST_KIND,
+        "license_id": "LP-TEST-0001", "machine_id": MACHINE, "max_stations": 3, "stations": [FP_A, FP_B],
+    }
+    payload.update(overrides)
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return b64url_encode(raw) + "." + b64url_encode(key.sign(raw))
+
+
+class SeatListContractTests(TestCase):
+    def test_the_cross_language_fixture_verifies(self):
+        value = seat_list.verify_seat_list(FIXTURE["token"], FIXTURE["public_key_hex"])
+        payload = FIXTURE["payload"]
+        self.assertEqual(
+            (value.license_id, value.machine_id, value.max_stations, list(value.stations), value.issued, value.expires.isoformat()),
+            (payload["license_id"], payload["machine_id"], payload["max_stations"], payload["stations"], payload["issued"], payload["expires"]),
+        )
+        self.assertTrue(value.lists(FIXTURE["listed_fingerprint"]))
+        self.assertFalse(value.lists(FIXTURE["unlisted_fingerprint"]))
+        body, signature = FIXTURE["token"].split(".")
+        tampered = signature[:-2] + ("BA" if signature.endswith("AA") else "AA")
+        with self.assertRaises(Exception):
+            seat_list.verify_seat_list(body + "." + tampered, FIXTURE["public_key_hex"])
+        with self.assertRaises(Exception):
+            seat_list.verify_seat_list(FIXTURE["token"], VENDOR_PUBLIC_HEX)
+
+    def test_lists_outside_the_contract_are_refused(self):
+        for overrides in (
+            {"stations": [FP_B, FP_A]},                       # not sorted
+            {"stations": [FP_A, FP_A]},                       # not unique
+            {"max_stations": 1},                              # more stations than seats
+            {"kind": "labelpilot-license"},
+            {"stations": ["xyz"]},
+            {"issued": "2026-10-05"},
+            {"extra": True},
+        ):
+            with self.assertRaises(ValueError, msg=overrides):
+                seat_list.verify_seat_list(seat_list_token(**overrides), VENDOR_PUBLIC_HEX)
+        # A licence token is not a seat list.
+        with self.assertRaises(ValueError):
+            seat_list.verify_seat_list(signed(), VENDOR_PUBLIC_HEX)
+
+
+class SeatListTests(LicenceTestCase):
+    def setUp(self):
+        super().setUp()
+        self.list_path = self.root / "license-seats.lst"
+        self.link_path = self.root / "license-seats.link"
+        patcher = mock.patch.dict(os.environ, {
+            "LABELPILOT_SEAT_LIST_PATH": str(self.list_path),
+            "LABELPILOT_SEAT_LIST_LINK_PATH": str(self.link_path),
+        })
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        seat_list.reset_cache()
+        self.addCleanup(seat_list.reset_cache)
+
+    def station(self, name, fingerprint, state="active"):
+        from label_stations.models import LabelsStations
+        return LabelsStations.objects.create(
+            station_name=name, station_ip=f"192.0.2.{LabelsStations.objects.count() + 10}",
+            seat_state=state, station_fingerprint=fingerprint,
+        )
+
+    def test_only_a_newer_list_of_this_licence_is_installed(self):
+        self.install(features=["seat-list"])
+        with self.on("2026-10-06"):
+            seat_list.install(seat_list_token())
+            for token in (
+                seat_list_token(license_id="LP-OTHER-0002"),
+                seat_list_token(machine_id="b" * 32),
+                seat_list_token(issued="2026-10-01T00:00:00Z"),
+                seat_list_token(Ed25519PrivateKey.generate(), issued="2026-10-07T00:00:00Z"),
+            ):
+                with self.assertRaises(Exception, msg=token):
+                    seat_list.install(token)
+            self.assertEqual(self.list_path.read_text(encoding="utf-8"), seat_list_token())
+            seat_list.install(seat_list_token(issued="2026-10-06T00:00:00Z", stations=[FP_A]))
+            self.assertEqual(seat_list.current().stations, (FP_A,))
+
+    def test_stations_outside_the_list_receive_no_data(self):
+        from licensing import seats
+        self.install(features=["seat-list"])
+        listed, unlisted = self.station("Line 1", FP_A), self.station("Line 2", FP_C)
+        legacy = self.station("Line 3", "")
+        with self.on("2026-10-06"):
+            # No list yet: nobody gets data.
+            for line in (listed, unlisted, legacy):
+                with self.assertRaises(seats.SeatError):
+                    seats.ensure_may_receive_data(line)
+            self.assertEqual(seats.seat_list_state(listed), "no_list")
+            seat_list.install(seat_list_token())
+            seats.ensure_may_receive_data(listed)
+            for line in (unlisted, legacy):
+                with self.assertRaises(seats.SeatError) as denied:
+                    seats.ensure_may_receive_data(line)
+                self.assertEqual(denied.exception.code, "station.notInSeatList")
+            self.assertEqual(seats.seat_list_state(listed), "listed")
+            self.assertEqual(seats.seat_list_state(unlisted), "unlisted")
+            self.assertEqual(seat_list.push_token(), seat_list_token())
+        with self.on("2027-01-04"):  # the day after the list expires
+            with self.assertRaises(seats.SeatError):
+                seats.ensure_may_receive_data(listed)
+            self.assertTrue(seat_list.status()["expired"])
+
+    def test_a_licence_without_the_feature_needs_no_list(self):
+        from licensing import seats
+        self.install()
+        line = self.station("Line 1", FP_C)
+        with self.on("2026-10-06"):
+            seats.ensure_may_receive_data(line)
+            self.assertIsNone(seats.seat_list_state(line))
+            self.assertIsNone(seat_list.push_token())
+            self.assertEqual(seat_list.sync().status, seat_list.NOT_REQUIRED)
+
+    def test_sync_sends_the_seated_stations_and_links_the_server(self):
+        self.install(features=["seat-list"])
+        self.station("Line 1", FP_A)
+        self.station("Line 2", FP_B)
+        self.station("Waiting", FP_C, state="pending")
+        self.station("Legacy", "")
+        sent = []
+
+        def vendor(body, timeout):
+            sent.append(body)
+            return {"status": "ok", "token": seat_list_token(issued=f"2026-10-06T00:00:0{len(sent)}Z")}
+
+        with self.on("2026-10-06"), mock.patch.object(seat_list, "_post", side_effect=vendor):
+            self.assertEqual(seat_list.sync().status, seat_list.UPDATED)
+            self.assertEqual(seat_list.sync().status, seat_list.UPDATED)
+            status = seat_list.status()
+        self.assertEqual(sent[0]["stations"], [FP_A, FP_B])
+        self.assertEqual((sent[0]["license_id"], sent[0]["machine_id"]), ("LP-TEST-0001", MACHINE))
+        self.assertRegex(sent[0]["sync_secret"], r"^[0-9a-f]{64}$")
+        self.assertEqual(sent[0]["sync_secret"], sent[1]["sync_secret"])
+        self.assertEqual(self.link_path.read_text(encoding="utf-8"), sent[0]["sync_secret"])
+        self.assertTrue(status["in_sync"] and status["linked"] and status["present"])
+        self.assertEqual(status["last_sync"]["status"], seat_list.UPDATED)
+
+    def test_sync_failures_keep_the_installed_list(self):
+        self.install(features=["seat-list"])
+        with self.on("2026-10-06"):
+            seat_list.install(seat_list_token())
+            forged = seat_list_token(Ed25519PrivateKey.generate(), issued="2026-10-07T00:00:00Z")
+            for answer, expected in (
+                ({"status": "rejected", "code": "release_limit"}, (seat_list.REJECTED, "release_limit")),
+                ({"status": "not_found"}, (seat_list.NOT_FOUND, "")),
+                ({"status": "ok", "token": forged}, (seat_list.REJECTED, "install")),
+            ):
+                with mock.patch.object(seat_list, "_post", return_value=answer):
+                    result = seat_list.sync()
+                self.assertEqual((result.status, result.detail), expected)
+            with mock.patch.object(seat_list, "_post", side_effect=OSError("offline")):
+                self.assertEqual(seat_list.sync().status, seat_list.UNAVAILABLE)
+            with mock.patch.dict(os.environ, {"SEAT_LIST_SYNC": "0"}):
+                self.assertEqual(seat_list.sync().status, seat_list.DISABLED)
+            self.assertEqual(self.list_path.read_text(encoding="utf-8"), seat_list_token())
+
+    def test_offline_request_and_import_endpoints_are_for_administrators(self):
+        self.install(features=["seat-list"])
+        self.station("Line 1", FP_A)
+        client = APIClient()
+        self.assertIn(client.get("/api/v1/license/seat-list/request/").status_code, (401, 403))
+        denied = client.post("/api/v1/license/seat-list/import/", {"token": seat_list_token()}, format="json")
+        self.assertIn(denied.status_code, (401, 403))
+        client.force_authenticate(get_user_model().objects.create_superuser("chief", password="x"))
+        with self.on("2026-10-06"):
+            request = client.get("/api/v1/license/seat-list/request/")
+            self.assertEqual(request.status_code, 200)
+            document = json.loads(request.content)
+            self.assertEqual(document["kind"], seat_list.SEAT_REQUEST_KIND)
+            self.assertEqual(
+                (document["license_id"], document["machine_id"], document["stations"]),
+                ("LP-TEST-0001", MACHINE, [FP_A]),
+            )
+            other = seat_list_token(license_id="LP-OTHER-0002")
+            self.assertEqual(client.post("/api/v1/license/seat-list/import/", {"token": other}, format="json").status_code, 400)
+            good = client.post("/api/v1/license/seat-list/import/", {"token": seat_list_token()}, format="json")
+            self.assertEqual(good.status_code, 200)
+            self.assertTrue(good.json()["seat_list"]["present"])
+            older = seat_list_token(issued="2026-10-01T00:00:00Z")
+            self.assertEqual(client.post("/api/v1/license/seat-list/import/", {"token": older}, format="json").status_code, 400)

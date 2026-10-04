@@ -224,10 +224,15 @@ def _heartbeat_loop(first_delay_sec: float) -> None:
 
 
 def _refresh_license() -> None:
-    """Daily: install a renewed licence from the sales service (own opt-out flag)."""
+    """Daily: install a renewed licence, then renew the vendor seat list (own opt-out flags)."""
     try:
         from licensing.refresh import refresh_quietly
         refresh_quietly()
+    except Exception:
+        pass
+    try:
+        from licensing.seat_list import sync_quietly
+        sync_quietly()
     except Exception:
         pass
 

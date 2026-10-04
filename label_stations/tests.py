@@ -207,7 +207,7 @@ class StationEndpointTests(TestCase):
                 "/api/v1/stations/ping/", {"station_uuid": str(line.station_uuid), "fingerprint": FINGERPRINT_A},
             )
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["seat"], {"state": "active", "fingerprint": "match", "used": 1, "limit": 3})
+        self.assertEqual(response.json()["seat"], {"state": "active", "fingerprint": "match", "used": 1, "limit": 3, "seat_list": None})
         LabelsStations.objects.filter(pk=line.pk).update(is_online=False)
         with policy(3):
             clone = self.client.get(

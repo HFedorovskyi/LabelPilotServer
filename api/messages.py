@@ -26,6 +26,24 @@ MESSAGES = {
         "de": "Diese Station liegt über der Platzanzahl der Lizenz: Es werden keine neuen Daten an sie gesendet. Geben Sie den Platz einer anderen Station frei oder erwerben Sie weitere Plätze.",
         "uk": "Станція понад кількість місць у ліцензії: нові дані їй не передаються. Звільніть місце іншої станції або докупіть місця."
     },
+    "station.notInSeatList": {
+        "ru": "Станции нет в списке мест, подписанном поставщиком: новые данные ей не передаются. Обновите список мест в настройках лицензии.",
+        "en": "This station is not in the supplier-signed seat list: no new data is sent to it. Update the seat list in the licence settings.",
+        "de": "Diese Station steht nicht in der vom Lieferanten signierten Platzliste: Es werden keine neuen Daten an sie gesendet. Aktualisieren Sie die Platzliste in den Lizenzeinstellungen.",
+        "uk": "Станції немає у списку місць, підписаному постачальником: нові дані їй не передаються. Оновіть список місць у налаштуваннях ліцензії."
+    },
+    "license.seatListInvalid": {
+        "ru": "Файл не является списком мест, подписанным поставщиком, или относится к другой лицензии или серверу.",
+        "en": "The file is not a supplier-signed seat list, or it belongs to another licence or server.",
+        "de": "Die Datei ist keine vom Lieferanten signierte Platzliste oder gehört zu einer anderen Lizenz oder einem anderen Server.",
+        "uk": "Файл не є списком місць, підписаним постачальником, або належить іншій ліцензії чи серверу."
+    },
+    "license.seatListOlder": {
+        "ru": "Этот список мест старше уже установленного.",
+        "en": "This seat list is older than the installed one.",
+        "de": "Diese Platzliste ist älter als die installierte.",
+        "uk": "Цей список місць старіший за встановлений."
+    },
     "station.seatReleaseLimit": {
         "ru": "Исчерпан лимит освобождения мест за 30 дней. При массовой замене оборудования обратитесь к поставщику.",
         "en": "The 30-day seat release allowance is used up. Contact your supplier when replacing hardware in bulk.",
