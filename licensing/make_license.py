@@ -1,132 +1,201 @@
-"""Vendor-side license generator. RUN THIS ON YOUR MACHINE ONLY.
+"""Offline emergency issuer for the same strict .lpl contract as LabelPilot Sales.
 
-The PRIVATE key must never ship with the product. Workflow:
-
-  1) One time — generate a keypair and embed the public key:
-       python make_license.py genkey --private-out C:/keys/vendor_private.key
-     Write the private key OUTSIDE the repo (never under backend/ — the build would
-     ship it). Paste the printed public key into core.py LICENSE_PUBLIC_KEY_HEX, rebuild.
-
-  2) Per customer — issue a signed license file:
-       python make_license.py issue --private vendor_private.key \
-           --customer "ООО Мясокомбинат" --max-stations 5 --expires 2027-06-23 \
-           --out license.lpl
-     Omit --max-stations for UNLIMITED; omit --expires for LIFETIME.
-     Add --machine-id <id> (the value the customer's server shows) to bind it.
-
-  RENEWAL: to renew a subscription, re-issue with the SAME --license-id and
-     --key-version and a new --expires. The derived data key depends ONLY on
-     (license_id, key_version), so the renewed license decrypts all existing files.
-     (Changing --key-version or --license-id rotates the key and strands old data.)
-
-The customer drops license.lpl next to .env in the install (or uploads it via the UI).
+The primary issuer is the Sales Edge service. This CLI accepts only a machine-bound
+license and only a private key matching the public key embedded in this server tree.
+Key and output paths must stay outside the repository.
 """
+from __future__ import annotations
+
 import argparse
 import base64
 import datetime
 import json
+import os
+import re
+import secrets
 import sys
+from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
+BACKEND_ROOT = Path(__file__).resolve().parent.parent
+REPOSITORY_ROOT = BACKEND_ROOT.parent
+sys.path.insert(0, str(BACKEND_ROOT))
+from licensing.core import LICENSE_PUBLIC_KEY_HEX  # noqa: E402
 
-def _b64url(b: bytes) -> str:
-    return base64.urlsafe_b64encode(b).decode().rstrip("=")
+CONTROL = re.compile(r"[\x00-\x1f\x7f]")
+LICENSE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,79}\Z")
+MACHINE_ID = re.compile(r"[0-9a-f]{32}\Z")
+FEATURE = re.compile(r"[A-Za-z0-9._:-]{1,64}\Z")
 
 
-def cmd_genkey(args):
-    sk = Ed25519PrivateKey.generate()
-    sk_hex = sk.private_bytes(
-        serialization.Encoding.Raw, serialization.PrivateFormat.Raw,
+def b64url(value: bytes) -> str:
+    return base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+
+
+def external_path(value: str, label: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    try:
+        path.relative_to(REPOSITORY_ROOT)
+    except ValueError:
+        return path
+    raise ValueError(f"{label} must be outside the server repository")
+
+
+def bounded_text(value: str, label: str, maximum: int) -> str:
+    text = str(value or "").strip()
+    if not text or len(text) > maximum or CONTROL.search(text):
+        raise ValueError(f"invalid {label}")
+    return text
+
+
+def iso_date(value: str, label: str) -> str:
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value or ""):
+        raise ValueError(f"{label} must be YYYY-MM-DD")
+    parsed = datetime.date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError(f"invalid {label}")
+    return value
+
+
+def utc_today() -> str:
+    return datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+
+
+def edition(max_stations: int | None, expires: str | None) -> str:
+    seats = "unlimited" if max_stations is None else f"{max_stations}-station"
+    return f"{'lifetime' if expires is None else 'subscription'}-{seats}"
+
+
+def read_production_private_key(path: Path) -> Ed25519PrivateKey:
+    raw = path.read_text(encoding="ascii").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", raw):
+        raise ValueError("private key must be 64 hexadecimal characters")
+    private_key = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(raw))
+    public_hex = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    ).hex()
+    if not secrets.compare_digest(public_hex, LICENSE_PUBLIC_KEY_HEX):
+        raise ValueError("private key does not match the public key embedded in the product")
+    return private_key
+
+
+def atomic_write(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{secrets.token_hex(8)}.tmp")
+    try:
+        temporary.write_text(value, encoding="utf-8")
+        if os.name != "nt":
+            temporary.chmod(0o600)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def command_genkey(args) -> None:
+    output = external_path(args.private_out, "private key path")
+    if output.exists():
+        raise FileExistsError(f"refusing to overwrite existing key: {output}")
+    private_key = Ed25519PrivateKey.generate()
+    private_hex = private_key.private_bytes(
+        serialization.Encoding.Raw,
+        serialization.PrivateFormat.Raw,
         serialization.NoEncryption(),
     ).hex()
-    pk_hex = sk.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw,
+    public_hex = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
     ).hex()
-    out = args.private_out or "vendor_private.key"
-    with open(out, "w", encoding="ascii") as f:
-        f.write(sk_hex)
-    print(f"Private key written to: {out}")
-    print("  KEEP THIS SECRET. Never commit it, never ship it in the product.")
-    print()
-    print("Embed this PUBLIC key in licensing/core.py -> LICENSE_PUBLIC_KEY_HEX:")
-    print(f"  {pk_hex}")
+    atomic_write(output, private_hex + "\n")
+    print(f"Private key written outside repository: {output}")
+    print(f"Public key: {public_hex}")
 
 
-def _edition(max_stations, expires):
-    seats = "unlimited" if max_stations is None else f"{max_stations}-station"
-    term = "lifetime" if expires is None else "subscription"
-    return f"{term}-{seats}"
+def command_issue(args) -> None:
+    private_path = external_path(args.private, "private key path")
+    output = external_path(args.out, "license output path")
+    private_key = read_production_private_key(private_path)
 
+    customer = bounded_text(args.customer, "customer", 160)
+    machine_id = args.machine_id.strip().lower()
+    if not MACHINE_ID.fullmatch(machine_id):
+        raise ValueError("machine-id must contain 32 lowercase hexadecimal characters")
+    if args.max_stations is not None and not 1 <= args.max_stations <= 100_000:
+        raise ValueError("max-stations must be in the range 1..100000")
+    if not 1 <= args.key_version <= 1_000_000:
+        raise ValueError("key-version must be in the range 1..1000000")
 
-def cmd_issue(args):
-    with open(args.private, "r", encoding="ascii") as f:
-        sk = Ed25519PrivateKey.from_private_bytes(bytes.fromhex(f.read().strip()))
-
-    if args.expires:
-        # validate format early so a typo doesn't ship a never-expiring license
-        datetime.date.fromisoformat(args.expires)
-
-    license_id = args.license_id or (
-        "LP-" + datetime.date.today().strftime("%Y%m%d") + "-" +
-        "".join(ch for ch in args.customer if ch.isalnum())[:8].upper()
+    issued = iso_date(args.issued or utc_today(), "issued")
+    expires = iso_date(args.expires, "expires") if args.expires else None
+    if expires is not None and expires < issued:
+        raise ValueError("expires cannot be earlier than issued")
+    license_id = bounded_text(
+        args.license_id or f"LP-{issued.replace('-', '')}-{secrets.token_hex(8).upper()}",
+        "license-id",
+        80,
     )
+    if not LICENSE_ID.fullmatch(license_id):
+        raise ValueError("invalid license-id")
+    feature_values = [] if not args.features else [item.strip() for item in args.features.split(",")]
+    if len(feature_values) > 64 or any(not FEATURE.fullmatch(item) for item in feature_values):
+        raise ValueError("invalid feature list")
+    feature_values = list(dict.fromkeys(feature_values))
+
     payload = {
-        "customer": args.customer,
+        "customer": customer,
         "license_id": license_id,
-        "issued": args.issued or datetime.date.today().isoformat(),
-        "expires": args.expires,            # None = lifetime
-        "max_stations": args.max_stations,  # None = unlimited
-        "machine_id": args.machine_id,      # None = unbound
+        "issued": issued,
+        "expires": expires,
+        "max_stations": args.max_stations,
+        "machine_id": machine_id,
         "key_version": args.key_version,
-        "edition": args.edition or _edition(args.max_stations, args.expires),
-        "features": args.features.split(",") if args.features else [],
+        "edition": bounded_text(args.edition or edition(args.max_stations, expires), "edition", 120),
+        "features": feature_values,
     }
     payload_bytes = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     ).encode("utf-8")
-    sig = sk.sign(payload_bytes)
-    token = _b64url(payload_bytes) + "." + _b64url(sig)
-
-    out = args.out or "license.lpl"
-    with open(out, "w", encoding="utf-8") as f:
-        f.write(token)
-    print(f"License written to: {out}")
+    token = f"{b64url(payload_bytes)}.{b64url(private_key.sign(payload_bytes))}"
+    atomic_write(output, token)
+    print(f"License written: {output}")
     print(json.dumps(payload, ensure_ascii=False, indent=2))
-    if args.machine_id is None:
-        print()
-        print("WARNING: issued UNBOUND (no --machine-id) — this license works on ANY machine.")
-        print("  Anyone who obtains the file can use it. For the anti-sharing control, bind it:")
-        print("  ask the customer to run `python manage.py show_machine_id` and re-issue with")
-        print("  --machine-id <that id>.")
 
 
-def main(argv=None):
-    p = argparse.ArgumentParser(description="LabelPilot license generator")
-    sub = p.add_subparsers(dest="cmd", required=True)
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="LabelPilot offline emergency license issuer")
+    commands = parser.add_subparsers(dest="command", required=True)
 
-    g = sub.add_parser("genkey", help="generate a signing keypair")
-    g.add_argument("--private-out", help="path to write the private key (default vendor_private.key)")
-    g.set_defaults(func=cmd_genkey)
+    keygen = commands.add_parser("genkey")
+    keygen.add_argument("--private-out", required=True)
+    keygen.set_defaults(handler=command_genkey)
 
-    i = sub.add_parser("issue", help="issue a signed license file")
-    i.add_argument("--private", required=True, help="path to the private key file")
-    i.add_argument("--customer", required=True, help="customer name (free text)")
-    i.add_argument("--max-stations", type=int, default=None, help="seat limit (omit = unlimited)")
-    i.add_argument("--expires", default=None, help="YYYY-MM-DD (omit = lifetime)")
-    i.add_argument("--machine-id", default=None, help="bind to one server's machine_id (omit = unbound)")
-    i.add_argument("--features", default=None, help="comma-separated feature flags")
-    i.add_argument("--edition", default=None, help="override the edition label")
-    i.add_argument("--license-id", default=None, help="override the auto license id")
-    i.add_argument("--key-version", type=int, default=1, help="key-derivation version")
-    i.add_argument("--issued", default=None, help="ISO issue date (omit = today)")
-    i.add_argument("--out", default=None, help="output path (default license.lpl)")
-    i.set_defaults(func=cmd_issue)
+    issue = commands.add_parser("issue")
+    issue.add_argument("--private", required=True)
+    issue.add_argument("--customer", required=True)
+    issue.add_argument("--machine-id", required=True)
+    issue.add_argument("--max-stations", type=int)
+    issue.add_argument("--expires")
+    issue.add_argument("--features")
+    issue.add_argument("--edition")
+    issue.add_argument("--license-id")
+    issue.add_argument("--key-version", type=int, default=1)
+    issue.add_argument("--issued")
+    issue.add_argument("--out", required=True)
+    issue.set_defaults(handler=command_issue)
 
-    args = p.parse_args(argv)
-    args.func(args)
+    args = parser.parse_args(argv)
+    try:
+        args.handler(args)
+        return 0
+    except Exception as error:
+        parser.error(str(error))
+        return 2
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

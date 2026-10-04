@@ -30,13 +30,17 @@ _DEFAULT_URL = "https://umvxtfwosbecbzthtjyh.supabase.co/functions/v1/report-ins
 
 # Min seconds between identical event+reason for the same machine (spam control).
 _EVENT_COOLDOWN = {
-    "heartbeat": 20 * 60 * 60,
+    "heartbeat": 23 * 60 * 60,        # daily pulse (~1/day; scheduler fires every 24h)
     "boot": 6 * 60 * 60,
     "license_activated": 60,          # allow a few retries
     "export_denied": 5 * 60,          # full log, but not every click
     "encrypt_denied": 5 * 60,
     "unlicensed_use": 5 * 60,
 }
+
+# Daily heartbeat interval (seconds). Slightly over cooldown so a successful send always lands.
+_HEARTBEAT_INTERVAL_SEC = 24 * 60 * 60
+_heartbeat_thread_started = False
 
 
 def _enabled() -> bool:
@@ -176,20 +180,48 @@ def send_install_report(timeout: float = 5.0) -> bool:
     return send_event("heartbeat", timeout=timeout)
 
 
-def schedule_install_report(delay_sec: float = 8.0) -> None:
-    """Fire-and-forget after boot (does not block Django ready())."""
-    def _run() -> None:
-        try:
-            time.sleep(max(0.0, delay_sec))
-            # boot once, then heartbeat uses cooldown for later process restarts same day
-            send_event("boot", force=False)
-        except Exception:
-            pass
-
+def _heartbeat_loop(first_delay_sec: float) -> None:
+    """Boot once after start, then heartbeat about once per day while the process lives."""
     try:
-        threading.Thread(target=_run, name="lp-license-telemetry", daemon=True).start()
+        time.sleep(max(0.0, first_delay_sec))
+        send_event("boot", force=False)
     except Exception:
         pass
+    # Spread first daily pulse ~24h after boot (boot already covered "today").
+    while True:
+        try:
+            time.sleep(_HEARTBEAT_INTERVAL_SEC)
+            if not _enabled():
+                continue
+            send_event("heartbeat", force=False)
+        except Exception:
+            # Never kill the loop; retry next day.
+            try:
+                time.sleep(60)
+            except Exception:
+                return
+
+
+def schedule_install_report(delay_sec: float = 8.0) -> None:
+    """Fire-and-forget boot + daily heartbeat (does not block Django ready()).
+
+    One background thread per process: boot shortly after start, then heartbeat
+    every ~24h so long-running installs stay visible in the sales admin without
+    requiring restarts.
+    """
+    global _heartbeat_thread_started
+    if _heartbeat_thread_started:
+        return
+    _heartbeat_thread_started = True
+    try:
+        threading.Thread(
+            target=_heartbeat_loop,
+            kwargs={"first_delay_sec": delay_sec},
+            name="lp-license-telemetry",
+            daemon=True,
+        ).start()
+    except Exception:
+        _heartbeat_thread_started = False
 
 
 def report_license_activated(license_id: Optional[str] = None) -> None:

@@ -47,12 +47,12 @@ SECRET_KEY = os.getenv(
 )
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv('DJANGO_DEBUG', 'True').strip().lower() in ('1', 'true', 'yes', 'on')
+# Development must opt in with DJANGO_DEBUG=1; an absent/malformed deployment .env stays fail-closed.
+DEBUG = os.getenv('DJANGO_DEBUG', 'False').strip().lower() in ('1', 'true', 'yes', 'on')
 
-# Strict licensing. When True (production), a present-but-tampered license fails CLOSED
-# (get_key raises instead of silently using the legacy key). Default False keeps
-# pre-licensing / dev installs lenient. Read AFTER _load_dotenv so the installer's .env
-# value is honored. In DEBUG this is downgraded to a warning so dev/CI never bricks.
+# Production licensing is strict whenever DEBUG is false. LICENSE_REQUIRED can additionally
+# force the same checks in a DEBUG commissioning environment; setting it false never
+# downgrades a production process. Read after _load_dotenv so the explicit override works.
 LICENSE_REQUIRED = os.getenv('LICENSE_REQUIRED', 'False').strip().lower() in ('1', 'true', 'yes', 'on')
 
 ALLOWED_HOSTS = [h for h in os.getenv('ALLOWED_HOSTS', '').split(',') if h]

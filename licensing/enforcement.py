@@ -1,15 +1,4 @@
-"""Commercial license enforcement — multiple independent checks.
-
-Design goals (honest offline DRM, not military-grade):
-  1. One deleted `if` in api/views.py must NOT be enough to open all exports.
-  2. Signature is re-verified on the commercial path (not only a cached flag).
-  3. Integrity fingerprint of critical modules is checked (patching .py without
-     updating the fingerprint fails the gate in production).
-  4. Demo / pre-license installs still work when DJANGO_DEBUG=1 or LICENSE_REQUIRED=0.
-
-Nothing here stops a determined reverse engineer forever — it raises the cost of
-a casual "delete one function" crack.
-"""
+"""Commercial license enforcement through independent native and Python checks."""
 from __future__ import annotations
 
 import logging
@@ -22,10 +11,24 @@ class CommercialLicenseDenied(PermissionError):
     """Raised when a commercial export/action is blocked. Callers map this to HTTP 403."""
 
 
+def _strict_mode() -> bool:
+    try:
+        from django.conf import settings
+
+        # DEBUG=False is itself a production boundary. LICENSE_REQUIRED can force
+        # the same checks in a debug commissioning environment, but it cannot disable them.
+        return bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(
+            getattr(settings, "DEBUG", False)
+        )
+    except Exception:
+        return False
+
+
 def _fresh_signature_ok(raw: str) -> bool:
-    """Independent re-verify of the raw token (does not trust the license_state cache)."""
+    """Independent re-verification that does not trust the license-state cache."""
     try:
         from .core import _verify_and_parse
+
         _verify_and_parse(raw)
         return True
     except Exception:
@@ -35,50 +38,84 @@ def _fresh_signature_ok(raw: str) -> bool:
 def _read_license_file() -> Optional[str]:
     try:
         from .core import _license_path
-        p = _license_path()
-        if not p.is_file():
+
+        path = _license_path()
+        if not path.is_file():
             return None
-        return p.read_text(encoding="utf-8").strip() or None
+        return path.read_text(encoding="utf-8").strip() or None
     except Exception:
         return None
 
 
-def commercial_license_ok() -> Tuple[bool, str]:
-    """Return (ok, reason_code). All sub-checks must agree.
+def _native_reason(reason: str) -> str:
+    if reason in {"missing", "license_missing"}:
+        return "missing"
+    if reason in {"bad_signature", "license_signature", "license_format"}:
+        return "bad_signature"
+    if reason in {"wrong_machine", "expired"}:
+        return reason
+    if reason in {
+        "manifest_missing",
+        "manifest_signature",
+        "manifest_contract",
+        "manifest_path",
+        "integrity_hash",
+        "unsigned_code",
+    }:
+        return "integrity"
+    return "native_guard"
 
-    reason_code is stable for logs/UI: missing | bad_signature | integrity | wrong_machine | expired | ok
+def commercial_license_ok() -> Tuple[bool, str]:
+    """Return ``(ok, reason_code)`` only when all available checks agree.
+
+    Production requires the native verifier, its signed build manifest, and the
+    independent Python verifier. Source-tree development can fall back to Python
+    when no release guard/manifest has been staged.
     """
-    # 1) Integrity of critical modules (fail closed only when production-strict).
+    strict = _strict_mode()
+
+    try:
+        from .native_guard import verify_license_native
+
+        native = verify_license_native()
+        if native.available and not native.ok:
+            return False, _native_reason(native.reason)
+        if not native.available and strict:
+            return False, "native_guard"
+    except Exception:
+        logger.exception("native license guard integration failed")
+        if strict:
+            return False, "native_guard"
+
     try:
         from .integrity import integrity_ok
+
         if not integrity_ok():
             return False, "integrity"
     except Exception:
-        # If integrity module itself is missing/broken in a prod build, fail closed when strict.
-        from django.conf import settings
-        if getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False):
+        logger.exception("signed integrity verification failed")
+        if strict:
             return False, "integrity"
 
     raw = _read_license_file()
     if not raw:
         return False, "missing"
 
-    # 2) Fresh cryptographic verify (ignores cache).
     if not _fresh_signature_ok(raw):
         return False, "bad_signature"
 
-    # 3) Cached state (machine + expiry + present) — must still match.
     from .core import license_state
-    st = license_state()
-    if not st.present or not st.signature_valid:
+
+    state = license_state()
+    if not state.present or not state.signature_valid:
         return False, "bad_signature"
-    if not st.machine_ok:
+    if not state.machine_ok:
         return False, "wrong_machine"
-    if st.expired:
+    if state.expired:
         return False, "expired"
 
-    # 4) load_license() path must also accept (wrong machine returns None).
     from .core import load_license
+
     if load_license() is None:
         return False, "wrong_machine"
 
@@ -86,11 +123,7 @@ def commercial_license_ok() -> Tuple[bool, str]:
 
 
 def assert_export_allowed() -> None:
-    """Hard gate for any real-data export to stations (online sync, .lpi/.lps/.lpj, full_dump).
-
-    Always enforced — independent of LICENSE_REQUIRED. That setting only controls
-    crypto fail-closed / integrity strictness / boot warnings.
-    """
+    """Gate every real-data export, independent of the boot warning mode."""
     ok, reason = commercial_license_ok()
     if ok:
         return
@@ -99,20 +132,8 @@ def assert_export_allowed() -> None:
 
 
 def assert_encrypt_allowed() -> None:
-    """Second gate used from crypto_utils.encrypt_data.
-
-    In production (LICENSE_REQUIRED and not DEBUG) refuse to mint LPI2/legacy
-    commercial blobs without a fully valid commercial license. In dev/lenient
-    mode this is a no-op so local testing still works without a license.lpl.
-    """
-    try:
-        from django.conf import settings
-        strict = bool(getattr(settings, "LICENSE_REQUIRED", False)) and not bool(
-            getattr(settings, "DEBUG", False)
-        )
-    except Exception:
-        strict = False
-    if not strict:
+    """Gate creation of commercial encrypted blobs in production-strict mode."""
+    if not _strict_mode():
         return
     ok, reason = commercial_license_ok()
     if not ok:
@@ -121,20 +142,22 @@ def assert_encrypt_allowed() -> None:
 
 
 def require_export_or_http() -> None:
-    """DRF-friendly wrapper: CommercialLicenseDenied -> rest_framework PermissionDenied."""
+    """DRF-friendly wrapper around the commercial export gate."""
     try:
         assert_export_allowed()
-    except CommercialLicenseDenied as e:
-        # Full log of unlicensed commercial export attempts (async, never blocks).
+    except CommercialLicenseDenied as exc:
         try:
             from licensing.telemetry import report_export_denied
-            report_export_denied(reason=str(e) or "missing", detail="export")
+
+            report_export_denied(reason=str(exc) or "missing", detail="export")
         except Exception:
             pass
         from rest_framework.exceptions import PermissionDenied
+
         try:
             from api.i18n import tr
-            msg = tr("license.exportDenied")
+
+            message = tr("license.exportDenied")
         except Exception:
-            msg = "A valid license is required to export data to stations."
-        raise PermissionDenied(msg)
+            message = "A valid license is required to export data to stations."
+        raise PermissionDenied(message) from exc

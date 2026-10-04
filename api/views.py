@@ -383,7 +383,7 @@ class LicenseView(APIView):
         # Surfaced separately so the admin UI can tell "bound to a different machine"
         # apart from "no license" (license_status() reports a wrong-machine license as
         # unlicensed). `strict` reflects the effective fail-closed posture.
-        data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) and not getattr(settings, 'DEBUG', False)
+        data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) or not bool(getattr(settings, 'DEBUG', False))
         data['signature_valid'] = st.signature_valid
         data['machine_ok'] = st.machine_ok
         data['stations_used'] = LabelsStations.objects.count()
@@ -395,6 +395,16 @@ class LicenseView(APIView):
             data['integrity'] = integrity_status()
         except Exception:
             data['integrity'] = {'integrity_ok': None}
+        try:
+            from licensing.native_guard import native_guard_status
+            guard = native_guard_status()
+            data['native_guard'] = {
+                'available': guard.get('available'),
+                'ok': guard.get('ok'),
+                'reason': guard.get('reason'),
+            }
+        except Exception:
+            data['native_guard'] = {'available': False, 'ok': False, 'reason': 'native_guard'}
         return Response(data)
 
 

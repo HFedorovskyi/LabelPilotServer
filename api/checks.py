@@ -1,9 +1,4 @@
-"""Startup visibility for strict licensing.
-
-Registered from api.apps.ApiConfig.ready() (api is already in INSTALLED_APPS, so we
-avoid adding 'licensing' as an app just for a log line). Uses Warning, never Error, so
-`manage.py migrate` / `collectstatic` / `runserver` are NEVER blocked — hard enforcement
-stays lazy in common.crypto_utils.get_key()."""
+"""Django startup diagnostics for strict production licensing."""
 from django.conf import settings
 from django.core.checks import Warning, register
 
@@ -11,38 +6,90 @@ from django.core.checks import Warning, register
 @register()
 def license_check(app_configs, **kwargs):
     warnings = []
-    try:
-        from licensing.integrity import integrity_ok, load_expected
-        if getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False):
-            if load_expected() is None:
-                warnings.append(Warning(
-                    "LICENSE_REQUIRED is on but licensing/_fingerprint.json is missing. "
-                    "Rebuild the installer (fingerprint step) or exports will be denied.",
-                    id="licensing.W002",
-                ))
-            elif not integrity_ok(force_reload=True):
-                warnings.append(Warning(
-                    "Licensing integrity fingerprint MISMATCH — critical modules were modified "
-                    "after the release build. Commercial export is denied until the build is restored.",
-                    id="licensing.W003",
-                ))
-    except Exception:
-        pass
+    strict = bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(
+        getattr(settings, "DEBUG", False)
+    )
 
-    if not getattr(settings, "LICENSE_REQUIRED", False):
+    if strict:
+        try:
+            from licensing.integrity import fingerprint_path, integrity_status
+
+            status = integrity_status()
+            if not fingerprint_path().is_file():
+                warnings.append(
+                    Warning(
+                        "Production build is missing licensing/_fingerprint.lpf. "
+                        "Commercial exports remain locked until a signed release is installed.",
+                        id="licensing.W002",
+                    )
+                )
+            elif not status.get("integrity_ok") or not status.get("signature_valid"):
+                warnings.append(
+                    Warning(
+                        "Signed licensing integrity verification failed. "
+                        "Commercial exports remain locked until the release files are restored.",
+                        id="licensing.W003",
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                Warning(
+                    f"Signed licensing integrity check failed to run: {exc}",
+                    id="licensing.W003",
+                )
+            )
+
+        try:
+            from licensing.native_guard import verify_license_native
+
+            native = verify_license_native(force_reload=True)
+            if not native.available:
+                warnings.append(
+                    Warning(
+                        "Native license guard or its signed manifest is missing. "
+                        "Commercial exports remain locked.",
+                        id="licensing.W004",
+                    )
+                )
+            elif not native.ok and native.reason not in {
+                "missing",
+                "bad_signature",
+                "wrong_machine",
+                "expired",
+            }:
+                warnings.append(
+                    Warning(
+                        f"Native license guard rejected the installed release: {native.reason}.",
+                        id="licensing.W005",
+                    )
+                )
+        except Exception as exc:
+            warnings.append(
+                Warning(
+                    f"Native license guard check failed to run: {exc}",
+                    id="licensing.W004",
+                )
+            )
+
+    if not strict:
         return warnings
     try:
         from licensing.core import license_state
-        st = license_state()
+
+        state = license_state()
     except Exception:
-        return warnings  # never let the check itself break a management command
-    if st.valid_for_key:
         return warnings
-    if not st.present:
-        msg = ("LICENSE_REQUIRED is on but NO license file is installed. Commercial "
-               "encrypt/export is denied until a valid license.lpl is installed.")
+    if state.valid_for_key:
+        return warnings
+    if not state.present:
+        message = (
+            "Production licensing is active but no license file is installed. "
+            "Commercial encryption/export remains locked."
+        )
     else:
-        msg = ("LICENSE_REQUIRED is on and the installed license is INVALID (bad "
-               "signature or wrong machine). Minting encrypted artifacts will fail until fixed.")
-    warnings.append(Warning(msg, id="licensing.W001"))
+        message = (
+            "Production licensing is active and the installed license has an invalid signature "
+            "or machine binding. Commercial encryption/export remains locked."
+        )
+    warnings.append(Warning(message, id="licensing.W001"))
     return warnings

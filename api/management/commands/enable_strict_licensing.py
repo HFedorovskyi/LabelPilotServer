@@ -1,13 +1,13 @@
 """Commissioning command: flip strict licensing on/off safely.
 
-`enable_strict_licensing` writes LICENSE_REQUIRED=true into backend/.env ONLY when a
+`enable_strict_licensing` writes LICENSE_REQUIRED=true into backend/.env only when a
 valid, machine-matched license is already installed — so a rollout can never brick a
 box that has not been licensed yet. Restart the LabelPilot service for it to take effect
 (settings are read at startup).
 
   python manage.py enable_strict_licensing            # guarded enable
   python manage.py enable_strict_licensing --status   # show license + strict state
-  python manage.py enable_strict_licensing --disable  # back to lenient
+  python manage.py enable_strict_licensing --disable  # disable the debug override
   python manage.py enable_strict_licensing --force     # enable despite a failed check (NOT recommended)
 """
 import os
@@ -19,7 +19,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 
 def _effective_strict() -> bool:
-    return bool(getattr(settings, "LICENSE_REQUIRED", False)) and not getattr(settings, "DEBUG", False)
+    return bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(getattr(settings, "DEBUG", False))
 
 
 def _set_env(env_path: Path, key: str, value: str) -> None:
@@ -53,7 +53,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--status", action="store_true", help="Show license + strict status and exit")
-        parser.add_argument("--disable", action="store_true", help="Set LICENSE_REQUIRED=false (back to lenient)")
+        parser.add_argument("--disable", action="store_true", help="Set LICENSE_REQUIRED=false (production remains strict while DEBUG=false)")
         parser.add_argument("--force", action="store_true", help="Enable even if the license check fails (NOT recommended)")
 
     def handle(self, *args, **options):
@@ -68,12 +68,12 @@ class Command(BaseCommand):
                 f"machine_ok={st.machine_ok} expired={st.expired}"
             )
             self.stdout.write(f"LICENSE_REQUIRED  : {getattr(settings, 'LICENSE_REQUIRED', False)}")
-            self.stdout.write(f"effective strict  : {_effective_strict()}  (strict = LICENSE_REQUIRED and not DEBUG)")
+            self.stdout.write(f"effective strict  : {_effective_strict()}  (strict = LICENSE_REQUIRED or not DEBUG)")
             return
 
         if options["disable"]:
             _set_env(env_path, "LICENSE_REQUIRED", "false")
-            self.stdout.write(self.style.WARNING("LICENSE_REQUIRED=false written. Restart the LabelPilot service to apply."))
+            self.stdout.write(self.style.WARNING("LICENSE_REQUIRED=false written. Production remains strict while DEBUG=false."))
             return
 
         # Guarded enable.

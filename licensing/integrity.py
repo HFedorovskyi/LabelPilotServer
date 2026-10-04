@@ -1,168 +1,315 @@
-"""Runtime integrity fingerprint for load-bearing licensing modules.
-
-Build step (native/build-fresh-installer.ps1) runs write_fingerprint.py which writes
-`licensing/_fingerprint.json` with SHA-256 of critical source files.
-
-At runtime commercial_license_ok() compares live file hashes. Patching a critical
-.py without regenerating the fingerprint fails the commercial gate when
-LICENSE_REQUIRED=1 and DEBUG=0.
-
-This is a speed bump, not a vault: a determined attacker can recompute hashes or
-disable the check. Combined with multi-site gates + .pyc-only shipping it raises cost.
-"""
+"""Verify the vendor-signed integrity manifest shipped with production builds."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import logging
+import re
+import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
 logger = logging.getLogger("licensing")
 
-# Relative to backend/ (parent of the licensing package).
-# Release builds may ship bytecode-only (foo.pyc next to where foo.py was).
-CRITICAL_REL_PATHS: List[str] = [
-    "licensing/core.py",
-    "licensing/enforcement.py",
-    "licensing/integrity.py",
-    "common/crypto_utils.py",
-    "api/views.py",
-]
+INTEGRITY_PUBLIC_KEY_HEX = (
+    "c117721acecaad66796887afb01de4a8ae5cb6ca7bcfbaaad3eed8f86910b901"
+)
+MANIFEST_KIND = "labelpilot-integrity-v2"
+MANIFEST_VERSION = 2
+MANIFEST_FILENAME = "_fingerprint.lpf"
+MAX_MANIFEST_BYTES = 1024 * 1024
+MAX_MANIFEST_FILES = 4096
+CACHE_SECONDS = 5.0
 
-_FINGERPRINT_NAME = "_fingerprint.json"
-_cache: Optional[Tuple[bool, str]] = None  # (ok, detail)
+REQUIRED_FILE_GROUPS = (
+    ("licensing/core.py", "licensing/core.pyc"),
+    ("licensing/enforcement.py", "licensing/enforcement.pyc"),
+    ("licensing/integrity.py", "licensing/integrity.pyc"),
+    ("licensing/native_guard.py", "licensing/native_guard.pyc"),
+    ("common/crypto_utils.py", "common/crypto_utils.pyc"),
+    ("api/views.py", "api/views.pyc"),
+)
+
+_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_B64URL = re.compile(r"^[A-Za-z0-9_-]+$")
+_cache: Optional[Tuple[float, tuple, bool, str, Optional[dict]]] = None
+
+
+class IntegrityError(RuntimeError):
+    """A signed manifest or one of its protected files is invalid."""
 
 
 def _backend_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _file_sha256(path: Path) -> str:
-    h = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-
-def _resolve_critical(root: Path, rel_py: str) -> Optional[Path]:
-    """Prefer .py (dev tree); fall back to sibling .pyc (release strip)."""
-    py = root / rel_py
-    if py.is_file():
-        return py
-    pyc = py.with_suffix(".pyc")
-    if pyc.is_file():
-        return pyc
-    return None
-
-
-def critical_paths() -> List[Path]:
-    root = _backend_root()
-    out: List[Path] = []
-    for rel in CRITICAL_REL_PATHS:
-        p = _resolve_critical(root, rel)
-        if p is not None:
-            out.append(p)
-    return out
-
-
-def compute_fingerprint() -> Dict[str, str]:
-    """Map stable key (always the .py rel path) -> sha256 of the resolved file (.py or .pyc)."""
-    root = _backend_root()
-    out: Dict[str, str] = {}
-    for rel in CRITICAL_REL_PATHS:
-        p = _resolve_critical(root, rel)
-        if p is not None:
-            out[rel.replace("\\", "/")] = _file_sha256(p)
-    return out
-
-
 def fingerprint_path() -> Path:
-    return Path(__file__).resolve().parent / _FINGERPRINT_NAME
+    return Path(__file__).resolve().parent / MANIFEST_FILENAME
 
 
-def write_fingerprint_file(dest: Optional[Path] = None) -> Path:
-    """Write/overwrite the fingerprint file (called from the build pipeline)."""
-    path = dest or fingerprint_path()
-    payload = {
-        "version": 1,
-        "files": compute_fingerprint(),
-    }
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return path
-
-
-def load_expected() -> Optional[Dict[str, str]]:
-    path = fingerprint_path()
-    if not path.is_file():
-        return None
+def _strict_mode() -> bool:
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        files = data.get("files") if isinstance(data, dict) else None
-        if not isinstance(files, dict) or not files:
-            return None
-        return {str(k).replace("\\", "/"): str(v) for k, v in files.items()}
+        from django.conf import settings
+
+        # DEBUG=False is itself a production boundary. LICENSE_REQUIRED can force
+        # the same checks in a debug commissioning environment, but it cannot disable them.
+        return bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(
+            getattr(settings, "DEBUG", False)
+        )
     except Exception:
+        return False
+
+
+def _b64url_decode(value: str, label: str) -> bytes:
+    if not value or not _B64URL.fullmatch(value):
+        raise IntegrityError(f"{label} is not canonical base64url")
+    try:
+        decoded = base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+    except Exception as exc:
+        raise IntegrityError(f"{label} is malformed") from exc
+    canonical = base64.urlsafe_b64encode(decoded).decode("ascii").rstrip("=")
+    if canonical != value:
+        raise IntegrityError(f"{label} is not canonical base64url")
+    return decoded
+
+
+def _reject_duplicate_keys(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise IntegrityError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def _parse_signed_manifest(path: Path) -> dict:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise IntegrityError(f"manifest is unreadable: {exc}") from exc
+    if size <= 0 or size > MAX_MANIFEST_BYTES:
+        raise IntegrityError("manifest size is outside the accepted range")
+    try:
+        token = path.read_text(encoding="ascii").strip()
+    except (OSError, UnicodeError) as exc:
+        raise IntegrityError(f"manifest is unreadable: {exc}") from exc
+    parts = token.split(".")
+    if len(parts) != 2:
+        raise IntegrityError("manifest token is malformed")
+    payload_bytes = _b64url_decode(parts[0], "manifest payload")
+    signature = _b64url_decode(parts[1], "manifest signature")
+    if len(signature) != 64:
+        raise IntegrityError("manifest signature has the wrong length")
+    try:
+        public_key = Ed25519PublicKey.from_public_bytes(
+            bytes.fromhex(INTEGRITY_PUBLIC_KEY_HEX)
+        )
+        public_key.verify(signature, payload_bytes)
+    except (InvalidSignature, ValueError) as exc:
+        raise IntegrityError("manifest signature is invalid") from exc
+    try:
+        payload = json.loads(
+            payload_bytes.decode("utf-8"), object_pairs_hook=_reject_duplicate_keys
+        )
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        raise IntegrityError("manifest payload is invalid JSON") from exc
+    _validate_contract(payload)
+    return payload
+
+
+def _normalize_relative(value: Any) -> str:
+    if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+        raise IntegrityError(f"unsafe manifest path: {value!r}")
+    if value.startswith("/"):
+        raise IntegrityError(f"unsafe manifest path: {value!r}")
+    parts = value.split("/")
+    if any(part in ("", ".", "..") for part in parts):
+        raise IntegrityError(f"unsafe manifest path: {value!r}")
+    return value
+
+
+def _validate_contract(payload: Any) -> None:
+    if not isinstance(payload, dict):
+        raise IntegrityError("manifest payload is not an object")
+    if (
+        payload.get("kind") != MANIFEST_KIND
+        or payload.get("manifest_version") != MANIFEST_VERSION
+        or payload.get("product") != "labelpilot-server"
+    ):
+        raise IntegrityError("unsupported integrity manifest")
+    release_version = payload.get("release_version")
+    issued_at = payload.get("issued_at")
+    if not isinstance(release_version, str) or not release_version or len(release_version) > 64:
+        raise IntegrityError("manifest release version is invalid")
+    if not isinstance(issued_at, str) or not issued_at:
+        raise IntegrityError("manifest issued_at is invalid")
+    files = payload.get("files")
+    if not isinstance(files, dict) or not 0 < len(files) <= MAX_MANIFEST_FILES:
+        raise IntegrityError("manifest file map is invalid")
+    signed_paths = {_normalize_relative(relative) for relative in files}
+    for group in REQUIRED_FILE_GROUPS:
+        if not any(candidate in signed_paths for candidate in group):
+            raise IntegrityError(f"manifest omits critical group: {' | '.join(group)}")
+    for relative, expected in files.items():
+        _normalize_relative(relative)
+        if not isinstance(expected, dict):
+            raise IntegrityError(f"manifest entry is invalid: {relative}")
+        digest = expected.get("sha256")
+        size = expected.get("size")
+        if (
+            not isinstance(digest, str)
+            or not _HEX_64.fullmatch(digest)
+            or not isinstance(size, int)
+            or isinstance(size, bool)
+            or size < 0
+        ):
+            raise IntegrityError(f"manifest entry is invalid: {relative}")
+
+
+def _resolve_regular_file(root: Path, relative: str) -> Path:
+    relative = _normalize_relative(relative)
+    candidate = root.joinpath(*relative.split("/"))
+    cursor = root
+    for part in relative.split("/"):
+        cursor = cursor / part
+        try:
+            if cursor.is_symlink():
+                raise IntegrityError(f"manifest path contains a symlink: {relative}")
+        except OSError as exc:
+            raise IntegrityError(f"manifest path is unreadable: {relative}: {exc}") from exc
+    if not candidate.is_file():
+        raise IntegrityError(f"protected file is missing: {relative}")
+    try:
+        canonical = candidate.resolve(strict=True)
+        canonical.relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise IntegrityError(f"manifest path escapes root: {relative}") from exc
+    return canonical
+
+
+def _file_sha256(path: Path) -> Tuple[int, str]:
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(65536), b""):
+            size += len(chunk)
+            digest.update(chunk)
+    return size, digest.hexdigest()
+
+
+def _actual_python_code(root: Path) -> set[str]:
+    output: set[str] = set()
+    skipped = {"__pycache__", "media", "staticfiles", "logs", ".git"}
+    for directory, directories, filenames in __import__("os").walk(root, followlinks=False):
+        directory_path = Path(directory)
+        kept = []
+        for name in directories:
+            child = directory_path / name
+            if name in skipped:
+                continue
+            if child.is_symlink():
+                raise IntegrityError(f"code directory is a symlink: {child}")
+            kept.append(name)
+        directories[:] = kept
+        for name in filenames:
+            path = directory_path / name
+            if path.suffix not in {".py", ".pyc"}:
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise IntegrityError(f"code file is not regular: {path}")
+            output.add(path.relative_to(root).as_posix())
+    return output
+
+
+def verify_signed_manifest() -> dict:
+    root = _backend_root().resolve(strict=True)
+    payload = _parse_signed_manifest(fingerprint_path())
+    for relative, expected in payload["files"].items():
+        actual_size, actual_hash = _file_sha256(_resolve_regular_file(root, relative))
+        if actual_size != expected["size"] or actual_hash != expected["sha256"]:
+            raise IntegrityError(f"integrity hash mismatch: {relative}")
+    unsigned = _actual_python_code(root) - set(payload["files"])
+    if unsigned:
+        raise IntegrityError(f"unsigned Python code: {sorted(unsigned)[0]}")
+    return payload
+
+
+def _state_key() -> tuple:
+    root = _backend_root()
+    paths = [fingerprint_path()]
+    for group in REQUIRED_FILE_GROUPS:
+        for relative in group:
+            candidate = root.joinpath(*relative.split("/"))
+            if candidate.is_file():
+                paths.append(candidate)
+                break
+    state = []
+    for path in paths:
+        try:
+            stat = path.stat()
+            state.append((str(path), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            state.append((str(path), None, None))
+    return tuple(state)
+
+
+def load_expected() -> Optional[Dict[str, dict]]:
+    """Compatibility helper: return the signed file map, or None if absent/invalid."""
+    try:
+        return _parse_signed_manifest(fingerprint_path())["files"]
+    except IntegrityError:
         return None
 
 
 def integrity_ok(force_reload: bool = False) -> bool:
-    """True if fingerprint matches or check is not enforced.
-
-    Enforcement rules:
-      - No fingerprint file → OK in lenient/dev (allows git checkouts without a build step).
-      - LICENSE_REQUIRED + not DEBUG + no fingerprint → FAIL (prod installer must ship it).
-      - Fingerprint present + mismatch → FAIL always (someone patched after install).
-    """
+    """Validate signature, contract, and hashes; production fails closed."""
     global _cache
-    if _cache is not None and not force_reload:
-        return _cache[0]
+    now = time.monotonic()
+    key = _state_key()
+    if (
+        not force_reload
+        and _cache is not None
+        and now - _cache[0] < CACHE_SECONDS
+        and _cache[1] == key
+    ):
+        return _cache[2]
 
-    try:
-        from django.conf import settings
-        strict = bool(getattr(settings, "LICENSE_REQUIRED", False)) and not bool(
-            getattr(settings, "DEBUG", False)
-        )
-    except Exception:
-        strict = False
-
-    expected = load_expected()
-    if expected is None:
+    strict = _strict_mode()
+    manifest = fingerprint_path()
+    if not manifest.is_file():
         ok = not strict
-        detail = "no_fingerprint_strict" if strict else "no_fingerprint_lenient"
-        _cache = (ok, detail)
-        if not ok:
-            logger.critical("licensing integrity: missing _fingerprint.json in production")
-        return ok
-
-    actual = compute_fingerprint()
-    # Every expected file must match; extra live files are ignored.
-    for rel, exp_hash in expected.items():
-        got = actual.get(rel)
-        if got is None or got != exp_hash:
-            logger.critical(
-                "licensing integrity MISMATCH on %s (expected %s… got %s…)",
-                rel, exp_hash[:12], (got or "missing")[:12],
-            )
-            # Dev trees edit sources constantly — only fail closed in production-strict.
+        detail = "missing_manifest_strict" if strict else "missing_manifest_lenient"
+        payload = None
+    else:
+        try:
+            payload = verify_signed_manifest()
+            ok = True
+            detail = "ok"
+        except Exception as exc:
+            ok = not strict
+            detail = f"invalid_manifest_{'strict' if strict else 'lenient'}:{exc}"
+            payload = None
             if strict:
-                _cache = (False, f"mismatch:{rel}")
-                return False
-            _cache = (True, f"mismatch_lenient:{rel}")
-            return True
-
-    _cache = (True, "ok")
-    return True
+                logger.critical("licensing signed integrity failed: %s", exc)
+            else:
+                logger.warning("licensing signed integrity ignored in development: %s", exc)
+    _cache = (now, key, ok, detail, payload)
+    return ok
 
 
 def integrity_status() -> dict:
-    """Diagnostics for /license status (no secrets)."""
-    expected = load_expected()
     ok = integrity_ok()
+    payload = _cache[4] if _cache else None
     return {
         "integrity_ok": ok,
-        "fingerprint_present": expected is not None,
-        "critical_files": list(CRITICAL_REL_PATHS),
-        "detail": _cache[1] if _cache else None,
+        "fingerprint_present": fingerprint_path().is_file(),
+        "signature_valid": bool(payload),
+        "manifest_version": payload.get("manifest_version") if payload else None,
+        "release_version": payload.get("release_version") if payload else None,
+        "protected_files": sorted(payload.get("files", {})) if payload else [],
+        "detail": _cache[3] if _cache else None,
     }

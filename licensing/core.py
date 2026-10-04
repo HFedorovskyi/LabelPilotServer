@@ -4,7 +4,7 @@ License file `license.lpl` lives next to .env in the backend dir. Format (JWT-is
     <b64url(payload_json)>.<b64url(ed25519_signature_over_payload_json)>
 
 The PUBLIC key is embedded below; the matching PRIVATE key lives ONLY on the
-vendor's licensing machine (see make_license.py). Verification, key-derivation,
+the Sales signing service. Verification, key-derivation,
 and limits are all offline — no network needed (online activation is a later layer).
 
 Load-bearing design: derive_data_key() feeds common.crypto_utils.get_key(), so a
@@ -18,6 +18,7 @@ import base64
 import datetime
 import hashlib
 import json
+import re
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,10 +34,26 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 LICENSE_PUBLIC_KEY_HEX = "bd770682b1bef5aa9c081320dad25e7e1c81752e357bdeb36d9016b4afe45e56"
 
 _LICENSE_FILENAME = "license.lpl"
+_LICENSE_TOKEN_LIMIT = 64 * 1024
+_LICENSE_FIELDS = {
+    "customer", "license_id", "issued", "expires", "max_stations",
+    "machine_id", "key_version", "edition", "features",
+}
+_LICENSE_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{2,79}\Z")
+_MACHINE_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+_FEATURE_RE = re.compile(r"[A-Za-z0-9._:-]{1,64}\Z")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
-def _b64url_decode(s: str) -> bytes:
-    return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+def _b64url_decode(value: str) -> bytes:
+    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", value):
+        raise ValueError("license contains non-canonical base64url")
+    decoded = base64.b64decode(
+        value + "=" * (-len(value) % 4), altchars=b"-_", validate=True,
+    )
+    if b64url_encode(decoded) != value:
+        raise ValueError("license contains non-canonical base64url")
+    return decoded
 
 
 def b64url_encode(b: bytes) -> str:
@@ -61,7 +78,7 @@ class License:
     issued: Optional[str]
     expires: Optional[str]        # ISO date "YYYY-MM-DD" or None = lifetime
     max_stations: Optional[int]   # None = unlimited
-    machine_id: Optional[str]     # None = not bound to a specific server
+    machine_id: str               # required 32-char machine binding
     key_version: int
     edition: str
     features: list
@@ -110,39 +127,112 @@ def machine_id() -> str:
         return hashlib.sha256(str(uuid.getnode()).encode()).hexdigest()[:32]
 
 
-def _verify_and_parse(raw: str) -> License:
-    payload_b64, sig_b64 = raw.strip().split(".", 1)
-    payload_bytes = _b64url_decode(payload_b64)
-    signature = _b64url_decode(sig_b64)
-    pub = Ed25519PublicKey.from_public_bytes(bytes.fromhex(LICENSE_PUBLIC_KEY_HEX))
-    pub.verify(signature, payload_bytes)  # raises InvalidSignature on tamper/forgery
-    p = json.loads(payload_bytes.decode("utf-8"))
-    if not isinstance(p, dict):
-        raise ValueError("license payload is not a JSON object")
+def _object_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate license field: {key}")
+        result[key] = value
+    return result
+
+
+def _bounded_text(value, label: str, maximum: int) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be text")
+    text = value.strip()
+    if not text or len(text) > maximum or _CONTROL_RE.search(text):
+        raise ValueError(f"{label} is empty, too long, or contains control characters")
+    return text
+
+
+def _parse_license_date(value, label: str) -> datetime.date:
+    if not isinstance(value, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+        raise ValueError(f"{label} must be YYYY-MM-DD")
     try:
-        # A signed-but-malformed key_version (list/null/bool/non-numeric) must route
-        # through the bad-license path (ValueError, already caught -> fail closed),
-        # NOT a raw TypeError that would 500 every encryption endpoint.
-        key_version = int(p.get("key_version", 1))
-    except (TypeError, ValueError):
-        raise ValueError("license has a malformed key_version")
+        parsed = datetime.date.fromisoformat(value)
+    except ValueError as error:
+        raise ValueError(f"{label} is not a real calendar date") from error
+    if parsed.isoformat() != value:
+        raise ValueError(f"{label} is not canonical")
+    return parsed
+
+
+def _verify_and_parse(raw: str) -> License:
+    token = raw.strip()
+    if not token or len(token.encode("utf-8")) > _LICENSE_TOKEN_LIMIT:
+        raise ValueError("license token has an invalid size")
+    parts = token.split(".")
+    if len(parts) != 2 or not all(parts):
+        raise ValueError("license token is malformed")
+    payload_bytes = _b64url_decode(parts[0])
+    signature = _b64url_decode(parts[1])
+    if len(signature) != 64 or len(payload_bytes) > _LICENSE_TOKEN_LIMIT:
+        raise ValueError("license signature or payload has an invalid size")
+    public_key = Ed25519PublicKey.from_public_bytes(bytes.fromhex(LICENSE_PUBLIC_KEY_HEX))
+    public_key.verify(signature, payload_bytes)
+
+    payload = json.loads(
+        payload_bytes.decode("utf-8"), object_pairs_hook=_object_without_duplicates,
+    )
+    if not isinstance(payload, dict) or set(payload) != _LICENSE_FIELDS:
+        raise ValueError("license payload fields do not match the supported contract")
+    canonical = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    ).encode("utf-8")
+    if canonical != payload_bytes:
+        raise ValueError("license payload is not canonical JSON")
+
+    customer = _bounded_text(payload["customer"], "customer", 160)
+    license_id = _bounded_text(payload["license_id"], "license_id", 80)
+    if not _LICENSE_ID_RE.fullmatch(license_id):
+        raise ValueError("license_id has an invalid format")
+    issued_date = _parse_license_date(payload["issued"], "issued")
+    expires = payload["expires"]
+    if expires is not None:
+        expires_date = _parse_license_date(expires, "expires")
+        if expires_date < issued_date:
+            raise ValueError("expires cannot be earlier than issued")
+
+    max_stations = payload["max_stations"]
+    if max_stations is not None and (
+        isinstance(max_stations, bool) or not isinstance(max_stations, int)
+        or not 1 <= max_stations <= 100_000
+    ):
+        raise ValueError("max_stations must be null or a positive integer")
+    machine = payload["machine_id"]
+    if not isinstance(machine, str) or not _MACHINE_ID_RE.fullmatch(machine):
+        raise ValueError("machine_id must be 32 lowercase hex characters")
+    key_version = payload["key_version"]
+    if (
+        isinstance(key_version, bool) or not isinstance(key_version, int)
+        or not 1 <= key_version <= 1_000_000
+    ):
+        raise ValueError("key_version must be a positive integer")
+    edition = _bounded_text(payload["edition"], "edition", 120)
+    features = payload["features"]
+    if (
+        not isinstance(features, list) or len(features) > 64
+        or any(not isinstance(item, str) or not _FEATURE_RE.fullmatch(item) for item in features)
+        or len(set(features)) != len(features)
+    ):
+        raise ValueError("features have an invalid format")
+
     return License(
-        customer=p.get("customer", ""),
-        license_id=p.get("license_id", ""),
-        issued=p.get("issued"),
-        expires=p.get("expires"),
-        max_stations=p.get("max_stations"),
-        machine_id=p.get("machine_id"),
+        customer=customer,
+        license_id=license_id,
+        issued=payload["issued"],
+        expires=expires,
+        max_stations=max_stations,
+        machine_id=machine,
         key_version=key_version,
-        edition=p.get("edition", ""),
-        features=p.get("features", []) or [],
+        edition=edition,
+        features=features,
         payload_bytes=payload_bytes,
-        token=raw.strip(),
+        token=token,
     )
 
-
 class LicenseError(RuntimeError):
-    """Raised in strict mode (settings.LICENSE_REQUIRED) when a license is PRESENT but
+    """Raised in production strict mode (DEBUG=false or LICENSE_REQUIRED=true) when a license is PRESENT but
     invalid (bad signature) — so the server fails CLOSED instead of silently falling
     back to the legacy key. An ABSENT license never raises (see crypto_utils.get_key)."""
 
@@ -196,7 +286,7 @@ def license_state() -> LicenseState:
         try:
             lic = _verify_and_parse(path.read_text(encoding="utf-8"))
             sig_ok = True
-            machine_ok = (lic.machine_id is None) or (lic.machine_id == machine_id())
+            machine_ok = lic.machine_id == machine_id()
             expired = lic.is_expired()
         except (InvalidSignature, ValueError, TypeError, json.JSONDecodeError, OSError):
             # Present but forged / corrupt / unparseable -> fail CLOSED (sig_ok stays
@@ -292,3 +382,5 @@ def license_status() -> dict:
         "max_stations": lic.max_stations, "demo_max_stations": None,
         "license_id": lic.license_id, "features": lic.features, "machine_id": machine_id(),
     }
+
+

@@ -17,10 +17,10 @@ logger = logging.getLogger(__name__)
 def get_key():
     """The data-encryption key.
 
-    Lenient (default) or DEBUG: derive from a valid license if present, else fall back to
+    Development (DEBUG with LICENSE_REQUIRED disabled): derive from a valid license if present, else fall back to
     the legacy SHA256(SECRET_KEY) key so pre-licensing / dev installs keep working.
 
-    Strict (settings.LICENSE_REQUIRED and not DEBUG):
+    Strict (DEBUG is false, or LICENSE_REQUIRED is true):
       - valid license present -> license-derived key (ignores expiry/machine by design, so
         a lapsed subscription or a transient machine_id() blip never bricks the line);
       - NO license present     -> legacy fallback (don't brick a box that hasn't been
@@ -31,7 +31,7 @@ def get_key():
     The bare `except: pass` that used to swallow ALL errors into the legacy key is gone."""
     from licensing.core import license_state, derive_data_key, LicenseError
     st = license_state()
-    strict = getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False)
+    strict = bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(getattr(settings, "DEBUG", False))
 
     if st.valid_for_key:
         return derive_data_key(st.license)
@@ -60,7 +60,7 @@ def encrypt_data(data: dict) -> bytes:
         b"LPI2\\n" + <license token ascii> + b"\\n" + [IV(16)] + [PKCS7-padded ciphertext]
     Without a license it is the legacy format: [IV(16)] + [ciphertext].
 
-    Second commercial gate: in production (LICENSE_REQUIRED + not DEBUG) refuses to mint
+    Second commercial gate: in production (DEBUG=false) refuses to mint
     blobs without a fully valid commercial license — so removing only the view-layer
     `_require_license_for_export()` call is not enough to produce station payloads.
     """
@@ -79,7 +79,7 @@ def encrypt_data(data: dict) -> bytes:
         pass  # early bootstrap / partial tree
     except Exception:
         from django.conf import settings
-        if getattr(settings, "LICENSE_REQUIRED", False) and not getattr(settings, "DEBUG", False):
+        if bool(getattr(settings, "LICENSE_REQUIRED", False)) or not bool(getattr(settings, "DEBUG", False)):
             raise
 
     data_bytes = json.dumps(data).encode('utf-8')
