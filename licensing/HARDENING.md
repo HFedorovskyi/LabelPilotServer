@@ -9,10 +9,15 @@ DEBUG=false always activates the production boundary. LICENSE_REQUIRED=true may 
 | License signature | `backend/licensing/core.py` | Ed25519, canonical payload, exact field contract, machine binding, expiry and entitlement bounds |
 | Native decision | `native/license-guard` | Independently verifies the license and the signed backend manifest before commercial actions |
 | Backend manifest | `backend/licensing/_fingerprint.lpf` | Vendor-signed hash/size list for every shipped Python module; unsigned Python code is rejected |
-| Release envelope | `_release.lpr` | Vendor-signed guard, updater, runtime scripts, backend manifest, versions and wheels |
+| Release envelope | `_release.lpr` | Vendor-signed guard, updater, runtime scripts, backend manifest, versions and wheels, plus one digest per runtime tree (`python/` required, `ghostscript/` when present) re-hashed by the guard before every backend start |
+| Interpreter | `native/run-backend.cmd`, `run-discovery.cmd` | Python runs with `-E -s` and a bytecode cache outside the signed trees that is wiped on every start (planted `.pth`, `sitecustomize`, `PYTHON*` variables or `.pyc` files do not load) |
+| Guard authenticity | `backend/licensing/native_guard.py` | The guard binary's hash must match the signed release manifest before its verdict is used; a stub guard is refused |
+| Seat cap | `backend/licensing/seats.py` | Recomputed from the licence at every data export: only the first `max_stations` active stations in seat order receive data, so editing seat states in the database gains nothing |
 | Runtime gate | `backend/licensing/enforcement.py` | Native and Python checks must agree before export/encryption |
 | Update gate | `updater/updater_service.py` | ZIP layout and both signatures are checked before services stop; customer state is preserved |
 | Filesystem boundary | `native/install-services.ps1` | Runtime is read/execute for interactive users and writable only by SYSTEM/Administrators |
+
+These layers raise the cost of tampering; none of them can stop an administrator of the server machine who patches both the startup scripts and the Python bytecode. The cryptographic boundary for seats is planned as vendor-signed per-station seat certificates verified by the stations.
 
 ## Key separation
 

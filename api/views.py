@@ -1112,9 +1112,13 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         import datetime
 
         station_id = request.query_params.get('station_id')
+        from licensing import seats
         qs = PrintJob.objects.filter(
             status='pending', station__seat_state='active',
         ).select_related('station', 'nomenclature')
+        seated = seats.seated_ids()
+        if seated is not None:
+            qs = qs.filter(station_id__in=seated)
         if station_id:
             qs = qs.filter(station_id=station_id)
 

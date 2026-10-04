@@ -87,6 +87,13 @@ def _reject_duplicate_keys(pairs):
 
 
 def _parse_signed_manifest(path: Path) -> dict:
+    payload = _verify_signed_payload(path)
+    _validate_contract(payload)
+    return payload
+
+
+def _verify_signed_payload(path: Path) -> dict:
+    """Signature-checked JSON payload of a vendor-signed manifest (any kind)."""
     try:
         size = path.stat().st_size
     except OSError as exc:
@@ -117,8 +124,43 @@ def _parse_signed_manifest(path: Path) -> dict:
         )
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise IntegrityError("manifest payload is invalid JSON") from exc
-    _validate_contract(payload)
+    if not isinstance(payload, dict):
+        raise IntegrityError("manifest payload is not an object")
     return payload
+
+
+RELEASE_MANIFEST_FILENAME = "_release.lpr"
+RELEASE_MANIFEST_KIND = "labelpilot-release-v1"
+GUARD_RELEASE_PATHS = ("tools/labelpilot-license-guard.exe", "tools/labelpilot-license-guard")
+
+
+def release_manifest_path() -> Path:
+    """<install root>/_release.lpr; the backend lives at <install root>/app/backend."""
+    return _backend_root().parent.parent / RELEASE_MANIFEST_FILENAME
+
+
+def signed_guard_record() -> Optional[dict]:
+    """The license guard's signed {"sha256", "size"} from the release manifest, or
+    None where no release manifest exists (a source tree). Raises IntegrityError
+    when the manifest is present but forged, foreign or incomplete."""
+    path = release_manifest_path()
+    if not path.is_file():
+        return None
+    payload = _verify_signed_payload(path)
+    if payload.get("kind") != RELEASE_MANIFEST_KIND or payload.get("product") != "labelpilot-server":
+        raise IntegrityError("unsupported release manifest")
+    files = payload.get("files")
+    if not isinstance(files, dict):
+        raise IntegrityError("release manifest file map is invalid")
+    for relative in GUARD_RELEASE_PATHS:
+        record = files.get(relative)
+        if isinstance(record, dict) and isinstance(record.get("sha256"), str) and isinstance(record.get("size"), int):
+            return {"sha256": record["sha256"].lower(), "size": record["size"]}
+    raise IntegrityError("release manifest does not sign the license guard")
+
+
+def file_digest(path: Path) -> Tuple[int, str]:
+    return _file_sha256(path)
 
 
 def _normalize_relative(value: Any) -> str:

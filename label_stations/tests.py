@@ -1,5 +1,6 @@
 """Named-seat licensing: seat assignment, releases, hardware binding and the
 data gates that depend on them (licensing/seats.py)."""
+import datetime
 import uuid
 from unittest import mock
 
@@ -68,12 +69,39 @@ class SeatAssignmentTests(TestCase):
         self.assertEqual(waiting.seat_state, seats.SEAT_ACTIVE)
         self.assertTrue(SeatEvent.objects.filter(event="assigned", actor="admin").exists())
 
-    def test_reduced_licence_keeps_existing_stations_working(self):
+    def test_only_the_first_seats_receive_data_when_over_the_cap(self):
         first, second = station("Line 1"), station("Line 2")
         with policy(1):
             self.assertTrue(seats.may_receive_data(first))
+            self.assertFalse(seats.may_receive_data(second))
+            with self.assertRaises(SeatError) as raised:
+                seats.ensure_may_receive_data(second)
+            self.assertEqual(raised.exception.code, "station.seatOverLimit")
+            summary = seats.summary()
+            self.assertTrue(summary["over_limit"])
+            self.assertEqual(summary["outside_cap"], 1)
+        with policy(None):
             self.assertTrue(seats.may_receive_data(second))
-            self.assertTrue(seats.summary()["over_limit"])
+
+    def test_marking_stations_active_in_the_database_gains_nothing(self):
+        holder = station("Line 1")
+        extra = [station(f"Copy {index}", state=seats.SEAT_PENDING) for index in range(3)]
+        LabelsStations.objects.filter(pk__in=[s.pk for s in extra]).update(seat_state=seats.SEAT_ACTIVE)
+        with policy(1):
+            fed = [s for s in LabelsStations.objects.all() if seats.may_receive_data(s)]
+        self.assertEqual([s.pk for s in fed], [holder.pk])
+
+    def test_seat_order_decides_who_keeps_the_seat(self):
+        from django.utils import timezone
+        early, late = station("Line 1"), station("Line 2")
+        now = timezone.now()
+        LabelsStations.objects.filter(pk=late.pk).update(seat_changed_at=now - datetime.timedelta(days=10))
+        LabelsStations.objects.filter(pk=early.pk).update(seat_changed_at=now)
+        early.refresh_from_db()
+        late.refresh_from_db()
+        with policy(1):
+            self.assertTrue(seats.may_receive_data(late))
+            self.assertFalse(seats.may_receive_data(early))
 
 
 class SeatReleaseTests(TestCase):
@@ -213,6 +241,13 @@ class StationEndpointTests(TestCase):
                 "station_uuid": str(line.station_uuid), "fingerprint": FINGERPRINT_A, "license": "none",
             }).json()
         self.assertNotIn("license_token", response)
+
+    def test_ping_shows_a_station_beyond_the_cap_as_waiting(self):
+        station("Line 1")
+        extra = station("Line 2")
+        with policy(1):
+            response = self.client.get("/api/v1/stations/ping/", {"station_uuid": str(extra.station_uuid)})
+        self.assertEqual(response.json()["seat"]["state"], "pending")
 
     def test_station_data_requires_an_active_seat(self):
         from api.views import _require_station_seat

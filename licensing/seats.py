@@ -10,8 +10,14 @@ Station identity is additionally bound to a hardware fingerprint sent by the
 client (32 lowercase hex). A second device announcing the same station UUID
 is recorded as a conflict and never takes over the station's address.
 
-Nothing here stops a working station: a lapsed or reduced licence only blocks
-NEW seats; existing active stations keep printing.
+The cap is enforced again at every data export from the licence itself, not
+from the stored seat state: only the first ``max_stations`` active stations in
+seat order (who got a seat first keeps it) receive data. Marking more stations
+"active" in the database therefore gains nothing.
+
+Nothing here stops a working station: a lapsed or reduced licence blocks new
+seats and new data for stations beyond the cap; every station keeps printing
+with the data it already has.
 """
 from __future__ import annotations
 
@@ -215,20 +221,53 @@ def replace_hardware(station, actor: str = "") -> None:
     _log(station, "hardware_replaced", actor, detail=f"{previous}->{station.station_fingerprint[:8]}")
 
 
+def seated_ids(policy: Optional[SeatPolicy] = None) -> Optional[set]:
+    """Primary keys of the active stations inside the licence's seat cap, in seat
+    order; None = no cap. Computed from the licence on every call."""
+    from django.db.models.functions import Coalesce
+
+    policy = policy or seat_policy()
+    if policy.limit is None:
+        return None
+    ordered = (
+        _stations().filter(seat_state=SEAT_ACTIVE)
+        .annotate(seat_order=Coalesce("seat_changed_at", "created_at"))
+        .order_by("seat_order", "pk")
+        .values_list("pk", flat=True)
+    )
+    return set(ordered[: max(0, policy.limit)])
+
+
+def within_cap(station, policy: Optional[SeatPolicy] = None, seated: Optional[set] = None) -> bool:
+    """An active station inside the seat cap. ``seated`` lets list views compute
+    the cap once for many stations."""
+    if station is None or station.seat_state != SEAT_ACTIVE:
+        return False
+    if seated is None:
+        seated = seated_ids(policy)
+    return seated is None or station.pk in seated
+
+
 def may_receive_data(station) -> bool:
-    return station is not None and station.seat_state == SEAT_ACTIVE
+    return within_cap(station)
 
 
 def ensure_may_receive_data(station) -> None:
-    if not may_receive_data(station):
+    if station is None or station.seat_state != SEAT_ACTIVE:
         raise SeatError("station.seatNotActive")
+    if not within_cap(station):
+        raise SeatError("station.seatOverLimit")
 
 
 def station_seat(station, fingerprint_status: Optional[str] = None) -> dict:
     """Seat facts a station shows to its operator (ping response)."""
     policy = seat_policy()
+    state = station.seat_state
+    if state == SEAT_ACTIVE and not within_cap(station, policy):
+        # Shown on the station as "waiting for a seat": it gets no new data.
+        state = SEAT_PENDING
     return {
-        "state": station.seat_state,
+        "state": state,
         "fingerprint": fingerprint_status
         or (FINGERPRINT_MATCH if station.station_fingerprint else FINGERPRINT_LEGACY),
         "used": active_count(),
@@ -249,6 +288,7 @@ def summary() -> dict:
         "fingerprinted": stations.exclude(station_fingerprint="").count(),
         "conflicts": stations.exclude(conflict_fingerprint="").count(),
         "over_limit": policy.limit is not None and active > policy.limit,
+        "outside_cap": max(0, active - policy.limit) if policy.limit is not None else 0,
         "releases_30d": releases_in_window(),
         "release_allowance": release_allowance(policy),
     }

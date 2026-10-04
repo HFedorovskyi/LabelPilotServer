@@ -152,6 +152,8 @@ class BarcodeTemplateSerializer(serializers.ModelSerializer):
 
 class LabelsStationsSerializer(serializers.ModelSerializer):
     station_number = serializers.SerializerMethodField()
+    # False for an active station beyond the licence's seat cap: it gets no data.
+    seat_within_cap = serializers.SerializerMethodField()
 
     class Meta:
         model = LabelsStations
@@ -161,6 +163,12 @@ class LabelsStationsSerializer(serializers.ModelSerializer):
         if obj.station_number is not None:
             return f"{obj.station_number:02d}"
         return None
+
+    def get_seat_within_cap(self, obj):
+        from licensing import seats
+        if "seated_ids" not in self.context:
+            self.context["seated_ids"] = seats.seated_ids()
+        return seats.within_cap(obj, seated=self.context["seated_ids"])
 
 class NomenclatureSerializer(serializers.ModelSerializer):
     portion_container_name = serializers.CharField(source='portion_container.name', read_only=True)

@@ -182,6 +182,43 @@ class ClockTests(LicenceTestCase):
             self.assertFalse(state.expired)
 
 
+class GuardAuthenticityTests(TestCase):
+    def setUp(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.guard = Path(directory.name) / "labelpilot-license-guard.exe"
+        self.guard.write_bytes(b"genuine guard")
+
+    def signed(self, record, strict=True):
+        from licensing import native_guard
+        return mock.patch.multiple(
+            "licensing.integrity", signed_guard_record=mock.Mock(return_value=record),
+        ), mock.patch.object(native_guard, "_strict_mode", return_value=strict)
+
+    def test_only_the_signed_guard_binary_is_trusted(self):
+        import hashlib
+        from licensing import native_guard
+        genuine = {"sha256": hashlib.sha256(b"genuine guard").hexdigest(), "size": len(b"genuine guard")}
+        patches = self.signed(genuine)
+        with patches[0], patches[1]:
+            self.assertTrue(native_guard._guard_is_signed(self.guard))
+            self.guard.write_bytes(b'@echo {"ok": true}')
+            self.assertFalse(native_guard._guard_is_signed(self.guard))
+
+    def test_a_forged_release_manifest_rejects_the_guard(self):
+        from licensing import native_guard
+        from licensing.integrity import IntegrityError
+        with mock.patch("licensing.integrity.signed_guard_record", side_effect=IntegrityError("forged")):
+            self.assertFalse(native_guard._guard_is_signed(self.guard))
+
+    def test_a_source_tree_needs_a_release_manifest_only_in_production(self):
+        from licensing import native_guard
+        for strict, expected in ((True, False), (False, True)):
+            patches = self.signed(None, strict=strict)
+            with patches[0], patches[1]:
+                self.assertEqual(native_guard._guard_is_signed(self.guard), expected)
+
+
 class RefreshTests(LicenceTestCase):
     def answer(self, status="ok", token=None, error=None):
         if error is not None:

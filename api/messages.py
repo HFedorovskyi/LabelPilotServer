@@ -20,6 +20,12 @@ MESSAGES = {
         "de": "Diese Station hat keinen lizenzierten Platz: Es werden keine Daten an sie gesendet.",
         "uk": "Станція не має місця за ліцензією: дані їй не передаються."
     },
+    "station.seatOverLimit": {
+        "ru": "Станция сверх числа мест в лицензии: новые данные ей не передаются. Освободите место другой станции или докупите места.",
+        "en": "This station is beyond the licence's seat count: no new data is sent to it. Release another station's seat or buy more seats.",
+        "de": "Diese Station liegt über der Platzanzahl der Lizenz: Es werden keine neuen Daten an sie gesendet. Geben Sie den Platz einer anderen Station frei oder erwerben Sie weitere Plätze.",
+        "uk": "Станція понад кількість місць у ліцензії: нові дані їй не передаються. Звільніть місце іншої станції або докупіть місця."
+    },
     "station.seatReleaseLimit": {
         "ru": "Исчерпан лимит освобождения мест за 30 дней. При массовой замене оборудования обратитесь к поставщику.",
         "en": "The 30-day seat release allowance is used up. Contact your supplier when replacing hardware in bulk.",

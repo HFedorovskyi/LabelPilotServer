@@ -99,6 +99,27 @@ def _decode_result(completed: subprocess.CompletedProcess[str]) -> NativeGuardRe
     return NativeGuardResult(True, False, "native_guard", detail)
 
 
+def _guard_is_signed(executable: Path) -> bool:
+    """The guard binary must be the one the vendor signed into the release manifest:
+    a stub that always prints {"ok": true} is refused before it is ever run."""
+    from .integrity import IntegrityError, file_digest, signed_guard_record
+
+    try:
+        record = signed_guard_record()
+    except IntegrityError as exc:
+        logger.error("license guard cannot be authenticated: %s", exc)
+        return False
+    if record is None:
+        # Source tree without a release manifest: production must have one.
+        return not _strict_mode()
+    try:
+        size, digest = file_digest(executable)
+    except Exception as exc:
+        logger.error("license guard is unreadable: %s", exc)
+        return False
+    return size == record["size"] and digest == record["sha256"]
+
+
 def _trusted_date() -> str:
     try:
         from .core import license_state
@@ -138,6 +159,11 @@ def verify_license_native(force_reload: bool = False) -> NativeGuardResult:
         if not manifest.is_file():
             missing.append("manifest")
         result = NativeGuardResult(False, not _strict_mode(), "native_guard_missing", ",".join(missing))
+        _cache = (now, key, result)
+        return result
+
+    if not _guard_is_signed(executable):
+        result = NativeGuardResult(True, False, "native_guard", "guard binary is not the signed release")
         _cache = (now, key, result)
         return result
 
