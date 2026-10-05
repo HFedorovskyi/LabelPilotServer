@@ -40,7 +40,7 @@ These layers raise the cost of tampering; none of them can stop an administrator
 
 Run `native/build-fresh-installer.ps1` or `native/build-update-zip.ps1` with `LABELPILOT_INTEGRITY_PRIVATE_KEY_FILE` pointing to the external integrity key. The build compiles protected modules, removes the protected Python sources from staging, signs `_fingerprint.lpf` and `_release.lpr`, then verifies both with the staged native guard.
 
-The first upgrade from a pre-hardening build (1.1.32 and older) must use the full installer: it stops the services and removes the previous release's `.py/.pyc` before copying. Later updates ship as signed `.lpupdate` packages (never `.zip`, which pre-1.1.33 updaters would unpack unchecked) and are accepted only when signed by the trusted integrity key and built for the installed runtime; a new runtime or pip dependency ships as a full installer. See `RELEASING.md`.
+The first upgrade from a pre-hardening build (1.1.33 and older) must use the full installer: it stops the services and removes the previous release's `.py/.pyc` before copying. Later updates ship as signed `.lpupdate` packages (never `.zip`, which pre-1.1.34 updaters would unpack unchecked) and are accepted only when signed by the trusted integrity key and built for the installed runtime; a new runtime or pip dependency ships as a full installer. See `RELEASING.md`.
 
 ## Verification
 
