@@ -20,7 +20,7 @@ from api.views import (
     LicenseSeatListRequestView,
     LicenseSeatListImportView,
 )
-from api.statistics_views import StatisticsView, StationLabelsView
+from api.statistics_views import StatisticsView, StationLabelsView, StationsTodayView
 from api.search_views import SearchView, NotificationsView
 from api.auth_views import (
     CsrfView, LoginView, LogoutView, MeView, BootstrapStatusView, BootstrapView,
@@ -53,6 +53,7 @@ urlpatterns = [
     path('auth/bootstrap/', BootstrapView.as_view(), name='auth-bootstrap'),
     path('statistics/', StatisticsView.as_view(), name='statistics'),
     path('statistics/station_labels/', StationLabelsView.as_view(), name='station-labels'),
+    path('statistics/stations_today/', StationsTodayView.as_view(), name='stations-today'),
     path('search/', SearchView.as_view(), name='search'),
     path('notifications/', NotificationsView.as_view(), name='notifications'),
     path('full_sync/', FullSyncView.as_view(), name='full-sync'),

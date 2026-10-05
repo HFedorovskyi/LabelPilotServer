@@ -15,6 +15,24 @@ import datetime
 from api.i18n import tr
 
 
+def net_weight_expr():
+    """Net grams of one label. Weight rule: a FIXED-weight product contributes its nominal
+    Nomenclature.fixed_weight_grams; a VARIABLE-weight product contributes the station-reported
+    actual net weight. A fixed product mis-configured with 0/NULL nominal falls back to the actual
+    weighed value (NullIf) so a real weighing is never silently counted as 0. Legacy rows with no
+    weight count as 0 (outer Coalesce)."""
+    return Coalesce(
+        Case(
+            When(product__is_fixed_weight=True,
+                 then=Coalesce(NullIf(F('product__fixed_weight_grams'), 0.0), F('weight_netto_grams'))),
+            default=F('weight_netto_grams'),
+            output_field=FloatField(),
+        ),
+        0.0,
+        output_field=FloatField(),
+    )
+
+
 class StatisticsView(APIView):
     permission_classes = [AllowAny]
 
@@ -27,20 +45,7 @@ class StatisticsView(APIView):
         total_labels = good.count()
         labels_today = good.filter(printed_at__gte=today).count()
 
-        # Weight rule: a FIXED-weight product contributes its nominal Nomenclature.fixed_weight_grams;
-        # a VARIABLE-weight product contributes the station-reported actual net weight. A fixed product
-        # mis-configured with 0/NULL nominal falls back to the actual weighed value (NullIf) so a real
-        # weighing is never silently counted as 0. Legacy rows with no weight count as 0 (outer Coalesce).
-        weight_expr = Coalesce(
-            Case(
-                When(product__is_fixed_weight=True,
-                     then=Coalesce(NullIf(F('product__fixed_weight_grams'), 0.0), F('weight_netto_grams'))),
-                default=F('weight_netto_grams'),
-                output_field=FloatField(),
-            ),
-            0.0,
-            output_field=FloatField(),
-        )
+        weight_expr = net_weight_expr()
         total_weight_kg = round(good.aggregate(w=Coalesce(Sum(weight_expr), 0.0))['w'] / 1000.0, 2)
         weight_today_kg = round(
             good.filter(printed_at__gte=today).aggregate(w=Coalesce(Sum(weight_expr), 0.0))['w'] / 1000.0, 2
@@ -335,4 +340,44 @@ class StationLabelsView(APIView):
             "limit": limit,
             "offset": offset,
             "labels": labels,
+        })
+
+
+class StationsTodayView(APIView):
+    """Today's work per station for the Stations page: good labels, net weight, the last label
+    (time and product) and good labels per hour since midnight. "Today" is the same UTC day the
+    dashboard counts. Stations without labels today are omitted (the page shows zero)."""
+
+    def get(self, request):
+        now = timezone.now()
+        today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        hours = [today + datetime.timedelta(hours=i) for i in range(now.hour + 1)]
+        good = PrintedLabel.objects.filter(is_deleted=False, printed_at__gte=today, station__isnull=False)
+
+        per_hour = {}
+        for row in (good.annotate(bucket=TruncHour('printed_at'))
+                    .values('station', 'bucket').annotate(c=Count('id'))):
+            per_hour.setdefault(row['station'], {})[row['bucket']] = row['c']
+
+        stations = []
+        for row in (good.values('station')
+                    .annotate(labels=Count('id'), weight_g=Coalesce(Sum(net_weight_expr()), 0.0),
+                              last_at=Max('printed_at'))):
+            station_id = row['station']
+            last_product = (good.filter(station_id=station_id).order_by('-printed_at', '-id')
+                            .values_list('product_name_snapshot', flat=True).first())
+            counts = per_hour.get(station_id, {})
+            stations.append({
+                "id": station_id,
+                "labels": row['labels'],
+                "weight_kg": round((row['weight_g'] or 0.0) / 1000.0, 2),
+                "last_at": row['last_at'].isoformat() if row['last_at'] else None,
+                "last_product": last_product or "",
+                "hourly": [counts.get(hour, 0) for hour in hours],
+            })
+
+        return Response({
+            "date": today.date().isoformat(),
+            "hours": [hour.isoformat() for hour in hours],
+            "stations": stations,
         })
