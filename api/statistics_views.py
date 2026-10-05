@@ -122,6 +122,16 @@ class StatisticsView(APIView):
             for item in top_products_qs
         ]
 
+        # Top products today (same UTC day as labels_today)
+        top_products_today = [
+            {
+                "name": item['product_name_snapshot'] or tr('stats.unknownProduct'),
+                "count": item['count']
+            }
+            for item in good.filter(printed_at__gte=today).values('product_name_snapshot')
+            .annotate(count=Count('id')).order_by('-count')[:5]
+        ]
+
         # Recent logs
         recent_logs_qs = StationLog.objects.select_related('station').order_by('-timestamp')[:10]
         recent_logs = [
@@ -248,6 +258,7 @@ class StatisticsView(APIView):
             "throughput_7d": throughput_7d,
             "top_stations": top_stations,
             "top_products": top_products,
+            "top_products_today": top_products_today,
             "recent_logs": recent_logs,
             "active_stations": active_stations,
             "total_stations": total_stations,

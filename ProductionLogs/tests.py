@@ -51,3 +51,21 @@ class StationsTodayTests(TestCase):
     def test_requires_a_signed_in_user(self):
         response = APIClient().get(self.url)
         self.assertIn(response.status_code, (401, 403))
+
+
+class TopProductsTodayTests(TestCase):
+    def test_counts_only_todays_good_labels(self):
+        now = timezone.now()
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        line = LabelsStations.objects.create(station_name="Line 1", station_ip="192.0.2.10")
+        label(line, now, 100, "Ham")
+        label(line, now, 100, "Ham")
+        label(line, now, 100, "Salami")
+        label(line, now, 100, "Salami", deleted=True)
+        for _ in range(3):
+            label(line, midnight - datetime.timedelta(minutes=5), 100, "Yesterday")
+
+        data = APIClient().get("/api/v1/statistics/").json()
+
+        self.assertEqual(data["top_products_today"], [{"name": "Ham", "count": 2}, {"name": "Salami", "count": 1}])
+        self.assertEqual(data["top_products"][0], {"name": "Yesterday", "count": 3})
