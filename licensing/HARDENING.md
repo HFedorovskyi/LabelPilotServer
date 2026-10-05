@@ -15,7 +15,7 @@ DEBUG=false always activates the production boundary. LICENSE_REQUIRED=true may 
 | Seat cap | `backend/licensing/seats.py` | Recomputed from the licence at every data export: only the first `max_stations` active stations in seat order receive data, so editing seat states in the database gains nothing |
 | Seat list | `backend/licensing/seat_list.py`, stations 2.0.6+ | Licences with the `seat-list` feature: every LPI2 payload carries a vendor-signed list of station fingerprints (at most `max_stations`, 90 days valid). Stations refuse data unless their own fingerprint is listed; this server cannot sign lists |
 | Runtime gate | `backend/licensing/enforcement.py` | Native and Python checks must agree before export/encryption |
-| Update gate | `updater/updater_service.py` | ZIP layout and both signatures are checked before services stop; customer state is preserved |
+| Update gate | `updater/updater_service.py` | `.lpupdate` layout and both signatures are checked before services stop, and the package must pin the installed `python/` and `ghostscript/` (guard `--skip-trees` / `--trees-only`); pip never touches the signed runtime; customer state is preserved |
 | Filesystem boundary | `native/install-services.ps1` | Runtime is read/execute for interactive users and writable only by SYSTEM/Administrators |
 
 These layers raise the cost of tampering; none of them can stop an administrator of the server machine who patches both the startup scripts and the Python bytecode. The seat list moves the seat boundary out of this machine: the list is signed by the sales service, which caps it at the licence's seats and spends the release allowance (max(2, seats) per 30 days) on removals, and the stations verify it themselves.
@@ -40,7 +40,7 @@ These layers raise the cost of tampering; none of them can stop an administrator
 
 Run `native/build-fresh-installer.ps1` or `native/build-update-zip.ps1` with `LABELPILOT_INTEGRITY_PRIVATE_KEY_FILE` pointing to the external integrity key. The build compiles protected modules, removes the protected Python sources from staging, signs `_fingerprint.lpf` and `_release.lpr`, then verifies both with the staged native guard.
 
-The first upgrade from a pre-hardening build must use the full installer. Later ZIP updates are accepted only when signed by the trusted integrity key.
+The first upgrade from a pre-hardening build (1.1.32 and older) must use the full installer: it stops the services and removes the previous release's `.py/.pyc` before copying. Later updates ship as signed `.lpupdate` packages (never `.zip`, which pre-1.1.33 updaters would unpack unchecked) and are accepted only when signed by the trusted integrity key and built for the installed runtime; a new runtime or pip dependency ships as a full installer. See `RELEASING.md`.
 
 ## Verification
 
