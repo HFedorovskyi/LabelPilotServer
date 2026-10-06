@@ -136,6 +136,18 @@ DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.sqlite3',
         'NAME': BASE_DIR / 'db.sqlite3',
+        # Many stations report at once. WAL lets the admin UI read while a report is
+        # being written; IMMEDIATE takes the write lock when a transaction starts, so a
+        # read-then-write transaction waits its turn (up to 20 s) instead of failing with
+        # "database is locked". SQLite ignores select_for_update, so IMMEDIATE is also
+        # what serialises the seat and notification updates that rely on it.
+        # WAL keeps recent writes in db.sqlite3-wal: copy the database with the SQLite
+        # backup API (the updater does), never db.sqlite3 alone.
+        'OPTIONS': {
+            'init_command': 'PRAGMA journal_mode=WAL',
+            'transaction_mode': 'IMMEDIATE',
+            'timeout': 20,
+        },
     }
 }
 
