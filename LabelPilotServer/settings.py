@@ -92,6 +92,7 @@ INSTALLED_APPS = [
     'ProductionLogs.apps.ProductionlogsConfig',
     'print_jobs.apps.PrintJobsConfig',
     'server_activity.apps.ServerActivityConfig',
+    'notifications.apps.NotificationsConfig',
 ]
 
 MIDDLEWARE = [

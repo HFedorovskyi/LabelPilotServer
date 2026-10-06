@@ -16,6 +16,9 @@ def main() -> None:
     port = int(os.getenv("PORT", "8000"))
     threads = int(os.getenv("WAITRESS_THREADS", "8"))
     print(f"LabelPilot backend (Waitress) serving on http://{host}:{port}")
+    # Periodic notification checks (stations gone silent, licence, seat list, updates).
+    from notifications.worker import start_worker
+    start_worker()
     serve(application, host=host, port=port, threads=threads)
 
 

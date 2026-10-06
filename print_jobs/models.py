@@ -53,6 +53,14 @@ class PrintJob(models.Model):
     created_at = models.DateTimeField(auto_now_add=True, verbose_name='Дата создания')
     updated_at = models.DateTimeField(auto_now=True, verbose_name='Дата обновления')
 
+    # Progress the station reports back (labels printed for this job, kg or pieces).
+    printed_qty = models.FloatField(default=0, verbose_name='Напечатано')
+    progress_at = models.DateTimeField(null=True, blank=True, verbose_name='Прогресс получен')
+    sent_at = models.DateTimeField(null=True, blank=True, verbose_name='Отправлено на станцию')
+    completed_at = models.DateTimeField(null=True, blank=True, verbose_name='Выполнено')
+    # Why the last network send failed (shown to the admin; cleared by a successful send).
+    last_error = models.CharField(max_length=500, blank=True, default='', verbose_name='Ошибка отправки')
+
     def __str__(self):
         return f"Задание #{self.pk} — {self.nomenclature.name} ({self.quantity} {self.get_quantity_unit_display()})"
 

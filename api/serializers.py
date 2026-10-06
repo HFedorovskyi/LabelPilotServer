@@ -225,4 +225,6 @@ class PrintJobSerializer(serializers.ModelSerializer):
     class Meta:
         model = PrintJob
         fields = '__all__'
+        # Progress and send results come from the station / the send action, never from a client edit.
+        read_only_fields = ('printed_qty', 'progress_at', 'sent_at', 'completed_at', 'last_error')
 

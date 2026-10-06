@@ -633,6 +633,8 @@ class StationsViewSet(viewsets.ModelViewSet):
         except seats.SeatError as error:
             raise _seat_denied(error)
         station.refresh_from_db()
+        from notifications.checks import check_stations
+        check_stations()
         return Response(self.get_serializer(station).data)
 
     @action(detail=True, methods=['post'], permission_classes=[_IsAdmin])
@@ -740,7 +742,9 @@ class StationsViewSet(viewsets.ModelViewSet):
         _require_license_for_export()
         station = self.get_object()
         
+        from notifications import events as notify
         if not station.station_ip:
+            notify.station_push(station, 'Station has no IP address')
             return Response({'error': 'Station has no IP address'}, status=status.HTTP_400_BAD_REQUEST)
 
         payload = self._gather_sync_data(station, sync_type='ONLINE_SYNC')
@@ -763,6 +767,7 @@ class StationsViewSet(viewsets.ModelViewSet):
             station.last_sync_at = tz.now()
             station.save(update_fields=['last_sync_at', 'changed_at'])
             log_event('station_synced', f'Данные синхронизированы со станцией «{station.station_name}» (онлайн)')
+            notify.station_push(station)
             return Response({'status': 'success', 'message': f'Data synced to {station.station_name}'})
         except requests.RequestException as e:
             error_msg = f'Failed to connect to station: {str(e)}'
@@ -773,6 +778,7 @@ class StationsViewSet(viewsets.ModelViewSet):
                 except Exception:
                     if e.response.text:
                         error_msg += f' - Details: {e.response.text[:200]}'
+            notify.station_push(station, error_msg)
             return Response({'error': error_msg}, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=True, methods=['get'])
@@ -837,9 +843,11 @@ class StationsViewSet(viewsets.ModelViewSet):
         file_obj = request.FILES.get('file')
         if not file_obj:
             return Response({'error': 'No file provided'}, status=status.HTTP_400_BAD_REQUEST)
+        from notifications import events as notify
         try:
             data = decrypt_data(file_obj.read())
         except Exception as e:
+            notify.report_rejected(request.META.get('REMOTE_ADDR'))
             return Response({'error': f'Decryption failed: {str(e)}'}, status=status.HTTP_400_BAD_REQUEST)
 
         station_uuid = data.get('station_uuid')
@@ -859,7 +867,7 @@ class StationsViewSet(viewsets.ModelViewSet):
         deleted_data = [it for it in (data.get('deleted_labels') or []) if it.get('unique_id')]
         logs_data = data.get('logs') or []
 
-        new_labels, new_logs = [], []
+        new_labels, new_logs, fresh_logs = [], [], []
         deleted_uids = [it['unique_id'] for it in deleted_data]
 
         def _audit(it):
@@ -908,10 +916,12 @@ class StationsViewSet(viewsets.ModelViewSet):
                     continue
                 if euid:
                     seen_l.add(euid)
+                fresh_logs.append(it)
                 new_logs.append(StationLog(
                     station=station,
                     level=it.get('level', 'INFO'),
                     message=it.get('message', ''),
+                    component=str(it.get('component') or '')[:32],
                     timestamp=parse_datetime(it.get('timestamp') or '') or tz.now(),
                     event_uid=euid or None,
                 ))
@@ -963,6 +973,11 @@ class StationsViewSet(viewsets.ModelViewSet):
                 station.last_sync_at = tz.now()
                 station.save(update_fields=['last_sync_at', 'changed_at'])
 
+        # Notifications: every new station error, job progress / completion, client version.
+        notify.station_errors(station, fresh_logs)
+        jobs_updated = notify.job_progress(station, data.get('print_jobs') or [])
+        notify.client_version(station, data.get('client_version'))
+
         labels_count, logs_count, deleted_count = len(new_labels), len(new_logs), len(deleted_data)
         station_label = station.station_name if station else station_uuid
         log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {deleted_count} отвесов, {logs_count} логов')
@@ -970,7 +985,8 @@ class StationsViewSet(viewsets.ModelViewSet):
         return Response({
             'status': 'success',
             'message': 'Report processed successfully',
-            'details': {'labels_processed': labels_count, 'deleted_processed': deleted_count, 'logs_processed': logs_count},
+            'details': {'labels_processed': labels_count, 'deleted_processed': deleted_count,
+                        'logs_processed': logs_count, 'jobs_updated': jobs_updated},
         })
 
     @action(detail=False, methods=['get'])
@@ -1002,6 +1018,8 @@ class StationsViewSet(viewsets.ModelViewSet):
                 fingerprint = seats.observe_fingerprint(
                     station, request.query_params.get('fingerprint'), 'ping',
                 )
+                from notifications import events as notify
+                notify.station_seen(station, conflict=fingerprint == seats.FINGERPRINT_CONFLICT)
                 # A second device reusing this identity never marks it online.
                 if fingerprint != seats.FINGERPRINT_CONFLICT:
                     station.is_online = True
@@ -1104,9 +1122,13 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         station = job.station
         _require_station_seat(station)
 
+        from notifications import events as notify
+        from django.utils import timezone as tz
         if not station.station_ip:
             job.status = 'error'
-            job.save(update_fields=['status', 'updated_at'])
+            job.last_error = tr('station.noIp')[:500]
+            job.save(update_fields=['status', 'last_error', 'updated_at'])
+            notify.job_send(job, job.last_error)
             return Response({'error': tr('station.noIp')}, status=status.HTTP_400_BAD_REQUEST)
 
         payload = {
@@ -1133,12 +1155,17 @@ class PrintJobViewSet(viewsets.ModelViewSet):
             )
             resp.raise_for_status()
             job.status = 'sent'
-            job.save(update_fields=['status', 'updated_at'])
+            job.sent_at = tz.now()
+            job.last_error = ''
+            job.save(update_fields=['status', 'sent_at', 'last_error', 'updated_at'])
+            notify.job_send(job)
             log_event('job_sent', f'Задание #{job.pk} «{job.nomenclature.name}» отправлено на станцию «{station.station_name}»')
             return Response({'status': 'success', 'message': tr('job.sentToStation', station=station.station_name)})
         except requests.RequestException as e:
             job.status = 'error'
-            job.save(update_fields=['status', 'updated_at'])
+            job.last_error = str(e)[:500]
+            job.save(update_fields=['status', 'last_error', 'updated_at'])
+            notify.job_send(job, e)
             return Response({'error': tr('job.sendError', error=str(e))}, status=status.HTTP_502_BAD_GATEWAY)
 
     @action(detail=True, methods=['get'])
@@ -1181,8 +1208,10 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         response = HttpResponse(encrypted, content_type='application/octet-stream')
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
+        from django.utils import timezone as tz
         job.status = 'sent'
-        job.save(update_fields=['status', 'updated_at'])
+        job.sent_at = tz.now()
+        job.save(update_fields=['status', 'sent_at', 'updated_at'])
         return response
 
     @action(detail=False, methods=['get'])
@@ -1252,6 +1281,7 @@ class PrintJobViewSet(viewsets.ModelViewSet):
         response['Content-Disposition'] = f'attachment; filename="{filename}"'
 
         # Mark all bundled jobs as sent
-        qs.filter(pk__in=job_ids).update(status='sent')
+        from django.utils import timezone as tz
+        qs.filter(pk__in=job_ids).update(status='sent', sent_at=tz.now())
         return response
 

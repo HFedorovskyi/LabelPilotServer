@@ -56,6 +56,9 @@ class StationLog(models.Model):
     station = models.ForeignKey(LabelsStations, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Станция")
     level = models.CharField(max_length=20, choices=LOG_LEVELS, default='INFO', verbose_name="Уровень")
     message = models.TextField(verbose_name="Сообщение")
+    # Station subsystem that reported it: print, printer, scale, sync, license, update,
+    # database, app. Empty for reports from older clients.
+    component = models.CharField(max_length=32, blank=True, default='', verbose_name="Подсистема")
     timestamp = models.DateTimeField(verbose_name="Время события")
     # Client-generated idempotency key so an online retry (or USB-then-online) of the same
     # log row is skipped instead of duplicated. Nullable for legacy/USB reports without it.

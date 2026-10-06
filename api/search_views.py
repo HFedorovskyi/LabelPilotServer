@@ -7,15 +7,12 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework.permissions import AllowAny
 from django.db.models import Q
-from django.utils import timezone
 
 from Nomenclature.models import Nomenclature
 from label_stations.models import LabelsStations
 from LabelTemplates.models import LabelTemplates
 from BarcodeTemplates.models import BarcodeTemplate
 from print_jobs.models import PrintJob
-from ProductionLogs.models import StationLog
-from server_activity.models import ServerEvent
 
 
 class SearchView(APIView):
@@ -58,35 +55,3 @@ class SearchView(APIView):
                             'subtitle': j.batch_number or ''})
 
         return Response({'query': q, 'results': results})
-
-
-class NotificationsView(APIView):
-    permission_classes = [AllowAny]
-
-    def get(self, request):
-        items = []
-
-        for log in StationLog.objects.select_related('station').filter(
-            level__in=['ERROR', 'WARNING']
-        ).order_by('-timestamp')[:20]:
-            items.append({
-                'id': f'log-{log.id}',
-                'kind': 'station',
-                'level': log.level,
-                'title': log.message,
-                'subtitle': (log.station.station_name if log.station else ''),
-                'created_at': log.timestamp.isoformat() if log.timestamp else None,
-            })
-
-        for ev in ServerEvent.objects.order_by('-created_at')[:20]:
-            items.append({
-                'id': f'ev-{ev.id}',
-                'kind': 'server',
-                'level': 'INFO',
-                'title': ev.get_action_display() or ev.description,
-                'subtitle': ev.description if ev.get_action_display() else '',
-                'created_at': ev.created_at.isoformat(),
-            })
-
-        items.sort(key=lambda x: x['created_at'] or '', reverse=True)
-        return Response({'notifications': items[:25], 'generated_at': timezone.now().isoformat()})
