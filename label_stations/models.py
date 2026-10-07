@@ -21,6 +21,9 @@ class LabelsStations(models.Model):
     is_online = models.BooleanField(default=False)
     mode = models.CharField(max_length=10, choices=MODE_CHOICES, default='online', verbose_name='Режим работы')
     last_sync_at = models.DateTimeField(null=True, blank=True, verbose_name='Последняя синхронизация')
+    # When the station last got the data set (push, USB file or its own pull). last_sync_at
+    # also moves when a report arrives, so it cannot tell whether product changes reached it.
+    data_pushed_at = models.DateTimeField(null=True, blank=True, verbose_name='Данные переданы станции')
     created_at = models.DateTimeField(auto_now_add=True)
     changed_at = models.DateTimeField(auto_now=True, null=True)
 

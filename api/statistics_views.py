@@ -154,10 +154,9 @@ class StatisticsView(APIView):
         barcode_templates_count = BarcodeTemplate.objects.count()
         pending_jobs_count = PrintJob.objects.filter(status='pending').count()
 
-        # Products without any label template
+        # Products a station cannot print: it refuses a pack without a pack label template.
         products_without_template = Nomenclature.objects.filter(
             templates_pack_label__isnull=True,
-            templates_box_label__isnull=True
         ).count()
 
         # Stations that haven't synced in > 7 days (only offline/hybrid)

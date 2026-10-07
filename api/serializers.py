@@ -160,6 +160,7 @@ class LabelsStationsSerializer(serializers.ModelSerializer):
     class Meta:
         model = LabelsStations
         fields = '__all__'
+        read_only_fields = ('data_pushed_at',)
 
     def get_station_number(self, obj):
         if obj.station_number is not None:

@@ -60,6 +60,13 @@ def _require_station_seat(station):
         raise _seat_denied(error)
 
 
+def _mark_data_handed_over(station):
+    """The station got the full data set (USB file or its own pull): products changed before
+    now are on it. Like a USB print job, a downloaded file counts as handed over."""
+    from django.utils import timezone as tz
+    LabelsStations.objects.filter(pk=station.pk).update(data_pushed_at=tz.now())
+
+
 def _station_license_token():
     """The signed license token for a station, or None without a valid commercial
     license (the same gate as every data export)."""
@@ -91,6 +98,16 @@ class ProductPackLinkViewSet(viewsets.ModelViewSet):
 class GlobalProductAttributeViewSet(viewsets.ModelViewSet):
     queryset = GlobalProductAttribute.objects.all().order_by('-created')
     serializer_class = GlobalProductAttributeSerializer
+
+    def perform_destroy(self, instance):
+        # The field's values go from every product too, so no template keeps printing a
+        # value nobody can see or edit any more; `edited` moves, so stations get the change.
+        from django.db import transaction
+        with transaction.atomic():
+            for product in Nomenclature.objects.filter(extra_data__has_key=instance.name):
+                product.extra_data.pop(instance.name, None)
+                product.save(update_fields=['extra_data', 'edited'])
+            instance.delete()
 
 
 class NomenclatureFolderViewSet(viewsets.ModelViewSet):
@@ -138,41 +155,12 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
     queryset = Nomenclature.objects.all().order_by('-created')
     serializer_class = NomenclatureSerializer
 
-    @action(detail=False, methods=['post'])
-    def send_to_stations(self, request):
-        # Pushing the real nomenclature table to station IPs is a real-data export -> gated.
-        _require_license_for_export()
-        stations_uuids = request.data.get('stations', [])
-        if not stations_uuids:
-             return Response({'error': 'No stations provided'}, status=status.HTTP_400_BAD_REQUEST)
-        
-        nomenclatures = self.get_queryset()
-        data_to_send = NomenclatureSerializer(nomenclatures, many=True).data
-        
-        results = {}
-        for uuid in stations_uuids:
-            try:
-                station = LabelsStations.objects.get(station_uuid=uuid)
-                if station.station_ip:
-                    try:
-                        url = f'http://{station.station_ip}:5005/'
-                        # Mimic legacy structure slightly to ensure compatibility if needed, 
-                        # or just send 'nomenclatures' as the key.
-                        payload = {
-                            'nomenclatures': data_to_send,
-                            # Sending empty fields def since we migrated away from Baserow dynamic fields
-                            'nomenclatures_field': [] 
-                        }
-                        requests.post(url, json=payload, timeout=2)
-                        results[uuid] = 'Sent'
-                    except requests.RequestException as e:
-                        results[uuid] = f'Failed: {str(e)}'
-                else:
-                    results[uuid] = 'No IP'
-            except LabelsStations.DoesNotExist:
-                results[uuid] = 'Not Found'
-                
-        return Response({'results': results})
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # ?no_template=1: products a station cannot print (no pack label template).
+        if self.request.query_params.get('no_template') == '1':
+            qs = qs.filter(templates_pack_label__isnull=True)
+        return qs
 
     @action(detail=False, methods=['post'])
     def preview_import(self, request):
@@ -765,7 +753,8 @@ class StationsViewSet(viewsets.ModelViewSet):
             resp.raise_for_status()
             from django.utils import timezone as tz
             station.last_sync_at = tz.now()
-            station.save(update_fields=['last_sync_at', 'changed_at'])
+            station.data_pushed_at = station.last_sync_at
+            station.save(update_fields=['last_sync_at', 'data_pushed_at', 'changed_at'])
             log_event('station_synced', f'Данные синхронизированы со станцией «{station.station_name}» (онлайн)')
             notify.station_push(station)
             return Response({'status': 'success', 'message': f'Data synced to {station.station_name}'})
@@ -793,6 +782,7 @@ class StationsViewSet(viewsets.ModelViewSet):
 
         station = self.get_object()
         data = self._gather_sync_data(station, sync_type='OFFLINE_UPDATE')
+        _mark_data_handed_over(station)
 
         encrypted_data = encrypt_data(data)
         
@@ -816,6 +806,7 @@ class StationsViewSet(viewsets.ModelViewSet):
              return Response({'error': 'Station has no number assigned'}, status=status.HTTP_400_BAD_REQUEST)
 
         data = self._gather_sync_data(station, sync_type='OFFLINE_IDENTITY')
+        _mark_data_handed_over(station)
         encrypted_identity = encrypt_data(data)
         
         filename = f"identity_{station.station_number:02d}.lpi"
@@ -1075,7 +1066,9 @@ class StationsViewSet(viewsets.ModelViewSet):
         if station_uuid:
             try:
                 station = LabelsStations.objects.get(station_uuid=station_uuid)
-                return Response(self._gather_sync_data(station))
+                data = self._gather_sync_data(station)
+                _mark_data_handed_over(station)
+                return Response(data)
             except LabelsStations.DoesNotExist:
                 pass
 

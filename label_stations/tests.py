@@ -289,3 +289,46 @@ class StationEndpointTests(TestCase):
         self.assertEqual(data["stations_used"], 1)
         self.assertEqual(data["seats"]["pending"], 1)
         self.assertEqual(data["seats"]["limit"], 1)
+
+
+class DataHandedOverTests(TestCase):
+    """data_pushed_at: when the station last got the data set, so the Products page can tell
+    whether product changes reached it (last_sync_at also moves on report uploads)."""
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(get_user_model().objects.create_superuser("chief", password="x"))
+        self.line = station("Line 1")
+        self.gates = [
+            mock.patch("api.views._require_license_for_export"),
+            mock.patch("common.crypto_utils.encrypt_data", return_value=b"x"),
+        ]
+        for gate in self.gates:
+            gate.start()
+            self.addCleanup(gate.stop)
+
+    def test_push_marks_only_a_delivered_push(self):
+        import requests
+        with mock.patch("api.views.requests.post", side_effect=requests.ConnectionError("refused")):
+            self.client.post(f"/api/v1/stations/{self.line.station_uuid}/sync_data/")
+        self.line.refresh_from_db()
+        self.assertIsNone(self.line.data_pushed_at)
+
+        ok = mock.Mock()
+        ok.raise_for_status.return_value = None
+        with mock.patch("api.views.requests.post", return_value=ok):
+            self.client.post(f"/api/v1/stations/{self.line.station_uuid}/sync_data/")
+        self.line.refresh_from_db()
+        self.assertIsNotNone(self.line.data_pushed_at)
+        self.assertEqual(self.line.data_pushed_at, self.line.last_sync_at)
+
+    def test_usb_file_counts_as_handed_over(self):
+        response = self.client.get(f"/api/v1/stations/{self.line.station_uuid}/download_update/")
+        self.assertEqual(response.status_code, 200)
+        self.line.refresh_from_db()
+        self.assertIsNotNone(self.line.data_pushed_at)
+
+    def test_not_writable_through_the_api(self):
+        self.client.patch(f"/api/v1/stations/{self.line.station_uuid}/", {"data_pushed_at": "2026-01-01T00:00:00Z"}, format="json")
+        self.line.refresh_from_db()
+        self.assertIsNone(self.line.data_pushed_at)
