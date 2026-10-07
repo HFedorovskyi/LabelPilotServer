@@ -1105,11 +1105,37 @@ class PrintJobViewSet(viewsets.ModelViewSet):
             return [AllowAny()]
         return super().get_permissions()
 
+    def get_queryset(self):
+        """?status=error,pending narrows the list; ?recent_days=N drops jobs completed more
+        than N days ago (the Print page refreshes the list every few seconds)."""
+        qs = super().get_queryset()
+        params = self.request.query_params
+        if params.get('status'):
+            qs = qs.filter(status__in=params['status'].split(','))
+        days = params.get('recent_days', '')
+        if days.isdigit():
+            from datetime import timedelta
+            from django.db.models import Q
+            from django.db.models.functions import Coalesce
+            from django.utils import timezone as tz
+            since = tz.now() - timedelta(days=int(days))
+            qs = qs.annotate(_done_at=Coalesce('completed_at', 'updated_at')).exclude(
+                Q(status='completed') & Q(_done_at__lt=since))
+        return qs
+
     def perform_create(self, serializer):
         job = serializer.save()
         station_name = job.station.station_name if job.station else '—'
         product_name = job.nomenclature.name if job.nomenclature else '—'
         log_event('job_created', f'Создано задание #{job.pk} «{product_name}» для станции «{station_name}»')
+
+    def perform_update(self, serializer):
+        job = serializer.save()
+        # Marked done by hand: a station that does not report progress (older client, USB).
+        if job.status == 'completed' and job.completed_at is None:
+            from django.utils import timezone as tz
+            job.completed_at = tz.now()
+            job.save(update_fields=['completed_at'])
 
     @action(detail=True, methods=['post'])
     def send_to_station(self, request, pk=None):
