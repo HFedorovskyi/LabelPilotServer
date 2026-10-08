@@ -47,7 +47,7 @@ ALLOWED_FIELD_TYPES = {
 GS1_ONLY_FIELD_TYPES = {'ai', 'fnc1', 'gs'}
 
 # Application Identifiers offered by the designer (kept in sync with frontend AI_OPTIONS).
-ALLOWED_AI_VALUES = {'00', '01', '02', '10', '11', '17', '21', '3103'}
+ALLOWED_AI_VALUES = {'00', '01', '02', '10', '11', '15', '17', '21', '3103'}
 
 
 def safe_int(value, default=0):
@@ -276,8 +276,9 @@ class BarcodeGenerator:
                 warnings.append(tr('barcode.fnc1Noted'))
 
             elif f_type == 'gs':
-                # Group separator -> ASCII 29.
-                string_for_generation += chr(29)
+                # Stations do not put a GS into the data either: the (AI) notation lets the
+                # encoder insert the separator itself.
+                warnings.append(tr('barcode.gsNoted'))
 
             elif f_type == 'article':
                 value, warn = self._resolve_article(item, product)
@@ -308,7 +309,7 @@ class BarcodeGenerator:
 
             elif f_type in self.runtime_dummies:
                 # Runtime-only fields with no product source: sample data + a single warning.
-                length = item.get('length', '12')
+                length = item.get('length') or item.get('minLength') or item.get('minLeght') or '0'
                 string_for_generation += self.format_runtime_dummy(f_type, length)
                 if not warned_runtime:
                     warnings.append(
@@ -320,35 +321,50 @@ class BarcodeGenerator:
 
     # --- Field resolvers ---
 
+    # The resolvers follow the station's generator (client src-tauri/src/barcode.rs), so
+    # the preview shows what is printed: numbers are padded with zeros but never cut,
+    # an article of 14 digits becomes a GTIN-14 with its check digit, dates ignore length.
+
     def _resolve_article(self, item, product):
-        length = safe_int(item.get('length', '12'), 12)
-        if product and getattr(product, 'article', None):
-            raw = str(product.article)
-            return self._fit_digits_or_raw(raw, length), None
-        # No product source available.
-        if self.AI_presence:
-            data_for_barcode = (max(length, 1) - 1) * '9'
-            return self.calculate_gtin14_checksum(data_for_barcode), \
-                tr('barcode.articleNotSelected')
-        return (max(length, 0) * '9'), tr('barcode.articleNotSelected')
+        length = safe_int(item.get('length', '14'), 14)
+        warning = None
+        raw = str(product.article) if product and getattr(product, 'article', None) else None
+        if raw is None:
+            raw = '9' * max(13 if length == 14 else length, 1)
+            warning = tr('barcode.articleNotSelected')
+        if length == 14:
+            base = self._pad(raw, 13)[-13:]
+            if not base.isdigit():
+                return '', warning
+            return self.calculate_gtin14_checksum(base), warning
+        return self._pad(raw, length), warning
 
     def _resolve_pack_count(self, item, product):
-        length = safe_int(item.get('length', '2'), 2)
+        length = safe_int(item.get('length', '0'), 0)
         if product and getattr(product, 'close_box_counter', None) is not None:
             raw = str(int(product.close_box_counter))
-            return self._fit_number(raw, length), None
-        return self._fit_number('99', length), \
+            return self._pad(raw, length), None
+        return self._pad('99', length), \
             tr('barcode.packCountTestData')
 
     def _resolve_extra_data(self, item, product):
         field_name = item.get('value', '')
-        length = safe_int(item.get('length', '12'), 12)
+        length = safe_int(item.get('length', '0'), 0)
         if (product and isinstance(getattr(product, 'extra_data', None), dict)
                 and field_name in product.extra_data):
             raw = str(product.extra_data[field_name])
-            return self._fit_number(raw, length), None
-        return self._fit_number('9' * max(length, 1), length), \
-            tr('barcode.extraFieldTestData', field=field_name)
+            warning = None
+        else:
+            raw = '9' * max(length, 1)
+            warning = tr('barcode.extraFieldTestData', field=field_name)
+        if length <= 0:
+            return raw, warning
+        return self._pad(raw, length)[:length], warning
+
+    @staticmethod
+    def _pad(raw, length):
+        """Zeros on the left up to `length`; a longer value stays whole (as on the station)."""
+        return raw if length <= 0 or len(raw) >= length else '0' * (length - len(raw)) + raw
 
     def _resolve_weight(self, item, product, is_fixed_weight):
         length = item.get('length', '6')
@@ -363,8 +379,9 @@ class BarcodeGenerator:
             tr('barcode.weightTestData')
 
     def _resolve_date(self, item, product, f_type):
-        date_format = item.get('dateFormat', 'ddMMyy')
-        length = item.get('length', '6')
+        # The station writes the date in this format and ignores a length.
+        date_format = item.get('dateFormat') or 'yyMMdd'
+        length = '0'
         if f_type == 'production_date':
             date_value = datetime.today()
         else:  # exp_date
@@ -376,43 +393,16 @@ class BarcodeGenerator:
 
     # --- Formatting helpers ---
 
-    def _fit_digits_or_raw(self, raw, length):
-        if length <= 0:
-            return raw
-        if len(raw) > length:
-            return raw[:length]
-        return raw.zfill(length) if raw.isdigit() else raw.rjust(length, '0')
-
-    def _fit_number(self, raw, length):
-        if length <= 0:
-            return raw
-        if len(raw) > length:
-            return raw[:length]
-        return raw.zfill(length)
-
     def format_runtime_dummy(self, field_type, length):
-        target_len = safe_int(length, 12)
-        base = self.runtime_dummies.get(field_type, '')
-        if target_len <= 0:
-            return base
-        if len(base) > target_len:
-            return base[:target_len]
-        return base.zfill(target_len)
+        return self._pad(self.runtime_dummies.get(field_type, ''), safe_int(length, 0))
 
     def format_weight_types(self, value, length, decimal_places):
-        length_int = safe_int(length, 6)
         decimals_int = safe_int(decimal_places, 3)
         try:
-            scaled_value = round(float(value) * (10 ** decimals_int))
-            scaled_str = str(int(scaled_value))
+            scaled_str = str(int(round(float(value) * (10 ** decimals_int))))
         except (TypeError, ValueError):
             scaled_str = '0'
-
-        if length_int <= 0:
-            return scaled_str
-        if len(scaled_str) > length_int:
-            return scaled_str[:length_int]
-        return scaled_str.zfill(length_int)
+        return self._pad(scaled_str, safe_int(length, 6))
 
     def format_date_types(self, date_value, date_format, length, padding_char='0'):
         format_mappings = {

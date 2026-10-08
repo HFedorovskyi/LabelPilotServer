@@ -242,6 +242,12 @@ MESSAGES = {
         "de": "EAN13 kann nicht erzeugt werden: Die Daten müssen genau 12 Ziffern vor der Prüfziffer enthalten, erhalten \"{data}\" ({len} Zeichen). Überprüfen Sie die Vorlagenfelder.",
         "uk": "Неможливо сформувати EAN13: дані мають містити рівно 12 цифр до контрольної цифри, отримано \"{data}\" ({len} симв.). Перевірте поля шаблону."
     },
+    "barcode.gsNoted": {
+        "ru": "Разделитель GS в данные не пишется: кодировщик ставит его сам по скобкам (AI).",
+        "en": "The GS separator is not written into the data: the encoder inserts it from the (AI) notation.",
+        "de": "Das GS-Trennzeichen wird nicht in die Daten geschrieben: der Encoder setzt es anhand der (AI)-Notation selbst.",
+        "uk": "Роздільник GS у дані не пишеться: кодувальник ставить його сам за дужками (AI)."
+    },
     "barcode.fnc1Noted": {
         "ru": "Поле \"fnc1\" учтено: FNC1 вставляется автоматически из нотации (AI).",
         "en": "The \"fnc1\" field has been noted: FNC1 is inserted automatically from the notation (AI).",
