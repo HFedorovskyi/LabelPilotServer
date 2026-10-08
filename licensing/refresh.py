@@ -11,6 +11,7 @@ Sends only license_id and machine_id. Disable with LICENSE_REFRESH=0.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import os
@@ -23,6 +24,9 @@ logger = logging.getLogger("licensing")
 
 _DEFAULT_URL = "https://umvxtfwosbecbzthtjyh.supabase.co/functions/v1/refresh-license"
 _lock = threading.Lock()
+# The last check (the daily one or the admin's button), for «Лицензия»: kept in memory, so
+# after a restart the page shows nothing until the next check.
+_last: Optional[dict] = None
 
 UPDATED = "updated"          # a newer token was installed
 CURRENT = "current"          # the installed licence is the newest one
@@ -81,8 +85,23 @@ def _fetch_token(license_id: str, machine: str, timeout: float) -> tuple:
     return str(data.get("status") or ""), token if isinstance(token, str) else None
 
 
+def last_refresh() -> Optional[dict]:
+    return dict(_last) if _last else None
+
+
 def refresh_license(timeout: float = 10.0) -> RefreshResult:
     """Ask the sales service for this licence's current token. Never raises."""
+    global _last
+    result = _refresh_license(timeout)
+    _last = {
+        "status": result.status,
+        "detail": result.detail,
+        "at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    return result
+
+
+def _refresh_license(timeout: float) -> RefreshResult:
     if not _enabled():
         return RefreshResult(DISABLED)
     from .core import _verify_and_parse, license_state, machine_id

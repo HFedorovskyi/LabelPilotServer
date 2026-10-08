@@ -244,3 +244,15 @@ class SystemProxyTests(TestCase):
         self.assertIn(b"PK-signed-bytes", sent["body"])
         self.assertIn(b'filename="LabelPilot-1.1.36.lpupdate"', sent["body"])
         self.assertTrue(sent["type"].startswith("multipart/form-data; boundary="))
+
+
+class LicenceRefreshRecordTests(TestCase):
+    def test_the_last_check_shows_on_the_licence_status(self):
+        from licensing.refresh import refresh_license
+        result = refresh_license()
+        data = APIClient().get("/api/v1/license/").json()
+        self.assertEqual(data["refresh_last"]["status"], result.status)
+        self.assertTrue(data["refresh_last"]["at"].endswith("Z"))
+
+    def test_no_licence_file_is_reported_as_none(self):
+        self.assertEqual(APIClient().get("/api/v1/license/").json()["license_file"], "none")

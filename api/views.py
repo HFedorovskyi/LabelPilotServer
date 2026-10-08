@@ -477,9 +477,15 @@ def _license_payload():
     data['strict'] = bool(getattr(settings, 'LICENSE_REQUIRED', False)) or not bool(getattr(settings, 'DEBUG', False))
     data['signature_valid'] = st.signature_valid
     data['machine_ok'] = st.machine_ok
+    # What the licence file is, for «Лицензия»: none, valid here, issued for another server
+    # (e.g. the server moved to new hardware) or not a LabelPilot licence at all.
+    data['license_file'] = ('none' if not st.present else 'invalid' if not st.signature_valid
+                            else 'foreign' if not st.machine_ok else 'ok')
     from licensing.seats import summary as seat_summary
     data['seats'] = seat_summary()
     data['stations_used'] = data['seats']['active']
+    from licensing.refresh import last_refresh
+    data['refresh_last'] = last_refresh()
     try:
         from licensing.seat_list import status as seat_list_status
         data['seat_list'] = seat_list_status()
