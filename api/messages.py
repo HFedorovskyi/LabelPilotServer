@@ -170,6 +170,114 @@ MESSAGES = {
         "de": "Ungültiger Benutzername oder Passwort.",
         "uk": "Неправильний логін або пароль."
     },
+    "auth.locked": {
+        "ru": "Слишком много неверных попыток. Вход с этого компьютера закрыт — попробуйте через {minutes} мин.",
+        "en": "Too many wrong attempts. Sign-in from this computer is closed — try again in {minutes} min.",
+        "de": "Zu viele Fehlversuche. Die Anmeldung von diesem Computer ist gesperrt – in {minutes} Min. erneut versuchen.",
+        "uk": "Забагато невдалих спроб. Вхід з цього комп’ютера закрито — спробуйте за {minutes} хв."
+    },
+    "reset.title": {
+        "ru": "LabelPilot — сброс пароля",
+        "en": "LabelPilot — password reset",
+        "de": "LabelPilot – Passwort zurücksetzen",
+        "uk": "LabelPilot — скидання пароля"
+    },
+    "reset.noUsers": {
+        "ru": "Учётных записей пока нет. Откройте {address} и создайте администратора.",
+        "en": "There are no accounts yet. Open {address} and create the administrator.",
+        "de": "Es gibt noch keine Konten. Öffnen Sie {address} und legen Sie den Administrator an.",
+        "uk": "Облікових записів поки немає. Відкрийте {address} і створіть адміністратора."
+    },
+    "reset.accounts": {
+        "ru": "Учётные записи сервера:",
+        "en": "Server accounts:",
+        "de": "Konten des Servers:",
+        "uk": "Облікові записи сервера:"
+    },
+    "reset.roleAdmin": {
+        "ru": "администратор",
+        "en": "administrator",
+        "de": "Administrator",
+        "uk": "адміністратор"
+    },
+    "reset.roleManager": {
+        "ru": "менеджер",
+        "en": "manager",
+        "de": "Manager",
+        "uk": "менеджер"
+    },
+    "reset.closed": {
+        "ru": "вход закрыт",
+        "en": "sign-in closed",
+        "de": "Anmeldung gesperrt",
+        "uk": "вхід закрито"
+    },
+    "reset.pick": {
+        "ru": "Номер учётной записи (Enter — выйти): ",
+        "en": "Account number (Enter to quit): ",
+        "de": "Nummer des Kontos (Enter – beenden): ",
+        "uk": "Номер облікового запису (Enter — вийти): "
+    },
+    "reset.badPick": {
+        "ru": "Нет такого номера.",
+        "en": "No such number.",
+        "de": "Diese Nummer gibt es nicht.",
+        "uk": "Немає такого номера."
+    },
+    "reset.password": {
+        "ru": "Новый пароль для «{login}» (символы не видны): ",
+        "en": "New password for “{login}” (characters are hidden): ",
+        "de": "Neues Passwort für „{login}“ (Zeichen bleiben unsichtbar): ",
+        "uk": "Новий пароль для «{login}» (символи не видно): "
+    },
+    "reset.repeat": {
+        "ru": "Повторите пароль: ",
+        "en": "Repeat the password: ",
+        "de": "Passwort wiederholen: ",
+        "uk": "Повторіть пароль: "
+    },
+    "reset.mismatch": {
+        "ru": "Пароли не совпадают, попробуйте ещё раз.",
+        "en": "The passwords differ, try again.",
+        "de": "Die Passwörter stimmen nicht überein, bitte erneut.",
+        "uk": "Паролі не збігаються, спробуйте ще раз."
+    },
+    "reset.rule": {
+        "ru": "Пароль — не короче 8 символов, не только цифры и не похож на логин.",
+        "en": "At least 8 characters, not digits only, not like the login.",
+        "de": "Mindestens 8 Zeichen, nicht nur Ziffern, nicht wie der Benutzername.",
+        "uk": "Пароль — не коротший за 8 символів, не лише цифри й не схожий на логін."
+    },
+    "reset.makeAdmin": {
+        "ru": "«{login}» — менеджер. Сделать администратором? [д/Н]: ",
+        "en": "“{login}” is a manager. Make them an administrator? [y/N]: ",
+        "de": "„{login}“ ist Manager. Zum Administrator machen? [j/N]: ",
+        "uk": "«{login}» — менеджер. Зробити адміністратором? [т/Н]: "
+    },
+    "reset.done": {
+        "ru": "Готово: новый пароль для «{login}» действует. Войдите на {address}.",
+        "en": "Done: the new password for “{login}” works. Sign in at {address}.",
+        "de": "Fertig: Das neue Passwort für „{login}“ gilt. Melden Sie sich unter {address} an.",
+        "uk": "Готово: новий пароль для «{login}» діє. Увійдіть на {address}."
+    },
+    "reset.reopened": {
+        "ru": "Вход для «{login}» был закрыт — теперь открыт.",
+        "en": "Sign-in for “{login}” was closed — it is open now.",
+        "de": "Die Anmeldung für „{login}“ war gesperrt – jetzt ist sie offen.",
+        "uk": "Вхід для «{login}» було закрито — тепер відкрито."
+    },
+    "reset.madeAdmin": {
+        "ru": "«{login}» теперь администратор.",
+        "en": "“{login}” is an administrator now.",
+        "de": "„{login}“ ist jetzt Administrator.",
+        "uk": "«{login}» тепер адміністратор."
+    },
+    "reset.unlocked": {
+        "ru": "Блокировки после неверных паролей сняты.",
+        "en": "Locks after wrong passwords are lifted.",
+        "de": "Sperren nach falschen Passwörtern sind aufgehoben.",
+        "uk": "Блокування після невірних паролів знято."
+    },
     "auth.adminExists": {
         "ru": "Администратор уже существует.",
         "en": "An administrator already exists.",

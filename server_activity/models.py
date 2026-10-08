@@ -23,3 +23,19 @@ class ServerEvent(models.Model):
         verbose_name = 'Серверное событие'
         verbose_name_plural = 'Серверные события'
         ordering = ['-created_at']
+
+
+class LoginThrottle(models.Model):
+    """Wrong passwords per computer (IP) and login, and the lock that follows too many.
+    `username` is lower-cased; "" holds the computer's total over all logins. Kept in the
+    database (not memory) so the password-reset tool on the server can lift a lock."""
+    ip = models.CharField(max_length=64)
+    username = models.CharField(max_length=150, blank=True, default='')
+    failures = models.PositiveIntegerField(default=0)
+    last_failure_at = models.DateTimeField()
+    locked_until = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        verbose_name = 'Неверные входы'
+        verbose_name_plural = 'Неверные входы'
+        constraints = [models.UniqueConstraint(fields=['ip', 'username'], name='login_throttle_ip_username')]

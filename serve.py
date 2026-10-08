@@ -19,6 +19,9 @@ def main() -> None:
     # Periodic notification checks (stations gone silent, licence, seat list, updates).
     from notifications.worker import start_worker
     start_worker()
+    # «LabelPilot — сброс пароля» in the Start menu, also for installs updated by .lpupdate.
+    from api.start_menu import ensure_in_background
+    ensure_in_background()
     serve(application, host=host, port=port, threads=threads)
 
 

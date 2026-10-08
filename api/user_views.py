@@ -4,13 +4,13 @@ Powers the web UI page «Доступ к серверу». Guards against lockin
 access: you cannot delete/deactivate/demote yourself or the last remaining admin."""
 from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.models import User, Group
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError
 from rest_framework import viewsets, serializers, status
 from rest_framework.response import Response
 
 from api.permissions import IsAdmin
 from api.auth_views import role_of, ensure_groups
+from api.login_throttle import clear_login
+from api.passwords import password_problem
 from api.i18n import tr
 
 
@@ -25,32 +25,6 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_role(self, obj):
         return role_of(obj)
-
-
-# The validators in settings.AUTH_PASSWORD_VALIDATORS, in the order a person fixes them.
-_PASSWORD_PROBLEMS = (
-    ("password_too_short", "user.passwordTooShort"),
-    ("password_entirely_numeric", "user.passwordNumeric"),
-    ("password_too_similar", "user.passwordSimilar"),
-    ("password_too_common", "user.passwordCommon"),
-)
-
-
-def _password_problem(password, user):
-    """Why the password is too weak, in the request's language, or None."""
-    codes = set()
-    try:
-        validate_password(password, user)
-    except ValidationError as e:
-        codes = {err.code for err in e.error_list} or {"weak"}
-    # Django's similarity check misses a short login inside a longer password ("olga2026olga").
-    login = (user.username or "").lower()
-    if len(login) >= 3 and login in password.lower():
-        codes.add("password_too_similar")
-    for code, key in _PASSWORD_PROBLEMS:
-        if code in codes:
-            return tr(key)
-    return tr("user.passwordWeak") if codes else None
 
 
 def _name(request):
@@ -86,7 +60,7 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response({"detail": tr('user.invalidRole')}, status=status.HTTP_400_BAD_REQUEST)
         if User.objects.filter(username=username).exists():
             return Response({"detail": tr('user.alreadyExists')}, status=status.HTTP_400_BAD_REQUEST)
-        problem = _password_problem(password, User(username=username, first_name=_name(request)))
+        problem = password_problem(password, User(username=username, first_name=_name(request)))
         if problem:
             return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
         user = User.objects.create_user(username=username, password=password, is_staff=True, first_name=_name(request))
@@ -101,7 +75,7 @@ class UserViewSet(viewsets.ModelViewSet):
         if "name" in request.data:
             user.first_name = _name(request)
         if new_password:
-            problem = _password_problem(new_password, user)
+            problem = password_problem(new_password, user)
             if problem:
                 return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -123,8 +97,10 @@ class UserViewSet(viewsets.ModelViewSet):
             # an admin changing their own password stays signed in here.
             user.set_password(new_password)
         user.save()
-        if new_password and user.id == request.user.id:
-            update_session_auth_hash(request, user)
+        if new_password:
+            clear_login(user.username)
+            if user.id == request.user.id:
+                update_session_auth_hash(request, user)
         return Response(UserSerializer(user).data)
 
     def destroy(self, request, *args, **kwargs):

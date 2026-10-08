@@ -15,6 +15,8 @@ from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
 from api.i18n import tr
+from api.login_throttle import client_ip, locked_seconds, record_failure, record_success
+from api.passwords import password_problem
 
 _MODEL_BACKEND = "django.contrib.auth.backends.ModelBackend"
 
@@ -52,16 +54,31 @@ class CsrfView(APIView):
         return Response({"detail": "csrf cookie set"})
 
 
+def _locked(seconds):
+    return Response({"detail": tr('auth.locked', minutes=max(1, -(-seconds // 60))), "locked_for": seconds},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS)
+
+
 class LoginView(APIView):
+    """Wrong passwords are counted per computer and login (api/login_throttle.py); while a
+    lock lasts the password is not even checked. `attempts_left` lets the page warn early."""
     permission_classes = [AllowAny]
 
     def post(self, request):
         username = (request.data.get("username") or "").strip()
         password = request.data.get("password") or ""
+        ip = client_ip(request)
+        wait = locked_seconds(ip, username)
+        if wait:
+            return _locked(wait)
         user = authenticate(request, username=username, password=password)
         if user is None or not user.is_active:
-            return Response({"detail": tr('auth.invalidCredentials')},
+            left, wait = record_failure(ip, username)
+            if wait:
+                return _locked(wait)
+            return Response({"detail": tr('auth.invalidCredentials'), "attempts_left": left},
                             status=status.HTTP_401_UNAUTHORIZED)
+        record_success(ip, username)
         login(request, user)
         return Response(user_payload(user))
 
@@ -98,6 +115,9 @@ class BootstrapView(APIView):
         if not username or not password:
             return Response({"detail": tr('common.loginPasswordRequired')},
                             status=status.HTTP_400_BAD_REQUEST)
+        problem = password_problem(password, User(username=username))
+        if problem:
+            return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
         with transaction.atomic():
             if User.objects.exists():
                 return Response({"detail": tr('auth.adminExists')},
