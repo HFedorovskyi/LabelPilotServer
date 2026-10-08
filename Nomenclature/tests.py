@@ -45,3 +45,47 @@ class FieldDeletionTests(TestCase):
         product.refresh_from_db()
         self.assertEqual(product.extra_data, {"Цена": "5"})
         self.assertGreater(product.edited, before)
+
+
+class TareAndTemplateChangeTests(TestCase):
+    """A new tare weight or template reaches stations only with the next push: the
+    products that use it count as changed, the others do not."""
+
+    def setUp(self):
+        import datetime
+        from Packs.models import Pack
+        self.client = APIClient()
+        self.client.force_authenticate(get_user_model().objects.create_superuser("chief", password="x"))
+        self.tray = Pack.objects.create(name="Tray", weight=0)
+        self.box = Pack.objects.create(name="Box", weight=400)
+        self.template = LabelTemplates.objects.create(name="Pack 58x40", scheme={})
+        make = lambda article, **fields: Nomenclature.objects.create(name=article, article=article, exp_date=10, close_box_counter=10, **fields)
+        self.on_tray = make("1", portion_container=self.tray, templates_pack_label=self.template)
+        self.in_box = make("2", box_container=self.box)
+        self.other = make("3")
+        # An hour back, so a coarse clock (Windows) cannot hide the bump.
+        self.before = self.other.edited - datetime.timedelta(hours=1)
+        Nomenclature.objects.update(edited=self.before)
+
+    def edited(self, product):
+        product.refresh_from_db()
+        return product.edited
+
+    def test_new_tare_weight_marks_its_products(self):
+        self.assertEqual(self.client.patch(f"/api/v1/packs/{self.tray.pk}/", {"weight": 12}, format="json").status_code, 200)
+        self.assertGreater(self.edited(self.on_tray), self.before)
+        self.assertEqual(self.edited(self.in_box), self.before)
+        self.assertEqual(self.edited(self.other), self.before)
+
+    def test_removed_box_marks_its_products(self):
+        self.assertEqual(self.client.delete(f"/api/v1/packs/{self.box.pk}/").status_code, 204)
+        self.assertGreater(self.edited(self.in_box), self.before)
+        self.in_box.refresh_from_db()
+        self.assertIsNone(self.in_box.box_container)
+        self.assertEqual(self.edited(self.on_tray), self.before)
+
+    def test_saved_template_marks_its_products(self):
+        response = self.client.patch(f"/api/v1/labels/{self.template.pk}/", {"name": "Pack 58x40 v2"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(self.edited(self.on_tray), self.before)
+        self.assertEqual(self.edited(self.other), self.before)

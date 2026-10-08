@@ -283,9 +283,27 @@ class NomenclatureViewSet(viewsets.ModelViewSet):
             'error_count': len(errors),
         })
 
+def _mark_products_changed(condition):
+    """Stations get tare weights and label templates together with the products. A
+    changed or removed one makes the products using it "changed since the last push",
+    so the admin shows those stations as behind until the data is sent again."""
+    from django.utils import timezone
+    Nomenclature.objects.filter(condition).update(edited=timezone.now())
+
+
 class PacksViewSet(viewsets.ModelViewSet):
     queryset = Pack.objects.all().order_by('-created')
     serializer_class = PackSerializer
+
+    def perform_update(self, serializer):
+        from django.db.models import Q
+        pack = serializer.save()
+        _mark_products_changed(Q(portion_container=pack) | Q(box_container=pack))
+
+    def perform_destroy(self, instance):
+        from django.db.models import Q
+        _mark_products_changed(Q(portion_container=instance) | Q(box_container=instance))
+        instance.delete()
 
 
 class PalletViewSet(viewsets.ModelViewSet):
@@ -295,6 +313,19 @@ class PalletViewSet(viewsets.ModelViewSet):
 class LabelTemplatesViewSet(viewsets.ModelViewSet):
     queryset = LabelTemplates.objects.all()
     serializer_class = LabelTemplatesSerializer
+
+    @staticmethod
+    def _users(template):
+        from django.db.models import Q
+        return Q(templates_pack_label=template) | Q(templates_box_label=template) | Q(templates_pallet_label=template)
+
+    def perform_update(self, serializer):
+        template = serializer.save()
+        _mark_products_changed(self._users(template))
+
+    def perform_destroy(self, instance):
+        _mark_products_changed(self._users(instance))
+        instance.delete()
 
 class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
     queryset = BarcodeTemplate.objects.all()
