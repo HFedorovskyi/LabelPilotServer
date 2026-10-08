@@ -90,8 +90,9 @@ class Operator(models.Model):
     short_code = models.CharField(max_length=50, blank=True, default='', verbose_name='Код/таб. номер')
     pin_hash = models.CharField(max_length=255, blank=True, default='')
     is_active = models.BooleanField(default=True)
+    # A removed station leaves its operators in place, on all stations.
     station = models.ForeignKey(
-        'LabelsStations', null=True, blank=True, on_delete=models.CASCADE,
+        'LabelsStations', null=True, blank=True, on_delete=models.SET_NULL,
         related_name='operators', verbose_name='Станция',
         help_text='Пусто = доступен на всех станциях',
     )
@@ -102,3 +103,21 @@ class Operator(models.Model):
 
     def __str__(self):
         return self.full_name
+
+
+class MasterDataChange(models.Model):
+    """When server data that reaches stations without a product edit last changed
+    (operators). Compared with a station's data_pushed_at to tell who is behind."""
+    key = models.CharField(max_length=50, unique=True)
+    changed_at = models.DateTimeField()
+
+    @classmethod
+    def touch(cls, key):
+        from django.utils import timezone
+        cls.objects.update_or_create(key=key, defaults={'changed_at': timezone.now()})
+
+    @classmethod
+    def at(cls, key):
+        row = cls.objects.filter(key=key).first()
+        return row.changed_at if row else None
+

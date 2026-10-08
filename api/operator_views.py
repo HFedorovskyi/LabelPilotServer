@@ -3,8 +3,10 @@
 The web API hides pin_hash and accepts a write-only `pin` (hashed server-side); the
 synced bundle (see _gather_sync_data) carries pin_hash so clients validate PINs offline."""
 from rest_framework import viewsets, serializers
+from rest_framework.decorators import action
+from rest_framework.response import Response
 
-from label_stations.models import Operator
+from label_stations.models import MasterDataChange, Operator
 from api.permissions import IsManagerOrAdmin
 
 
@@ -42,3 +44,22 @@ class OperatorViewSet(viewsets.ModelViewSet):
     queryset = Operator.objects.all().order_by('full_name')
     serializer_class = OperatorSerializer
     permission_classes = [IsManagerOrAdmin]
+
+    # Stations get the operator list with every data push (they replace theirs with it),
+    # so any change here makes stations pushed before it "behind".
+    def perform_create(self, serializer):
+        serializer.save()
+        MasterDataChange.touch('operators')
+
+    def perform_update(self, serializer):
+        serializer.save()
+        MasterDataChange.touch('operators')
+
+    def perform_destroy(self, instance):
+        instance.delete()
+        MasterDataChange.touch('operators')
+
+    @action(detail=False, methods=['get'])
+    def status(self, request):
+        changed = MasterDataChange.at('operators')
+        return Response({'changed_at': changed.isoformat() if changed else None})

@@ -332,3 +332,29 @@ class DataHandedOverTests(TestCase):
         self.client.patch(f"/api/v1/stations/{self.line.station_uuid}/", {"data_pushed_at": "2026-01-01T00:00:00Z"}, format="json")
         self.line.refresh_from_db()
         self.assertIsNone(self.line.data_pushed_at)
+
+
+class OperatorChangeTests(TestCase):
+    """Operators survive the removal of their station, and every change is dated so the
+    admin can tell which stations have not got it yet."""
+
+    def setUp(self):
+        from label_stations.models import Operator
+        self.client = APIClient()
+        self.client.force_authenticate(get_user_model().objects.create_superuser("chief", password="x"))
+        self.station = LabelsStations.objects.create(station_name="Line 1", station_ip="10.0.0.5")
+        self.operator = Operator.objects.create(full_name="Ivanova", short_code="07", station=self.station)
+
+    def test_removing_a_station_keeps_its_operators_on_all_stations(self):
+        self.station.delete()
+        self.operator.refresh_from_db()
+        self.assertIsNone(self.operator.station)
+
+    def test_every_operator_change_is_dated(self):
+        self.assertIsNone(self.client.get("/api/v1/operators/status/").json()["changed_at"])
+        self.assertEqual(self.client.patch(f"/api/v1/operators/{self.operator.pk}/", {"short_code": "08"}, format="json").status_code, 200)
+        first = self.client.get("/api/v1/operators/status/").json()["changed_at"]
+        self.assertIsNotNone(first)
+        self.assertEqual(self.client.delete(f"/api/v1/operators/{self.operator.pk}/").status_code, 204)
+        self.assertGreaterEqual(self.client.get("/api/v1/operators/status/").json()["changed_at"], first)
+
