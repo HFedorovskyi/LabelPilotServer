@@ -1,8 +1,11 @@
 """Admin-only user management (Django auth Users + 'admin'/'manager' Group roles).
 
-Powers the web UI "Пользователи" tab. Guards against locking the install out of admin
+Powers the web UI page «Доступ к серверу». Guards against locking the install out of admin
 access: you cannot delete/deactivate/demote yourself or the last remaining admin."""
+from django.contrib.auth import update_session_auth_hash
 from django.contrib.auth.models import User, Group
+from django.contrib.auth.password_validation import validate_password
+from django.core.exceptions import ValidationError
 from rest_framework import viewsets, serializers, status
 from rest_framework.response import Response
 
@@ -13,13 +16,45 @@ from api.i18n import tr
 
 class UserSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
+    # «Кто это»: a name or job title, so a login like "smena2" means something.
+    name = serializers.CharField(source="first_name", read_only=True)
 
     class Meta:
         model = User
-        fields = ["id", "username", "is_active", "is_superuser", "role"]
+        fields = ["id", "username", "name", "is_active", "is_superuser", "role", "last_login", "date_joined"]
 
     def get_role(self, obj):
         return role_of(obj)
+
+
+# The validators in settings.AUTH_PASSWORD_VALIDATORS, in the order a person fixes them.
+_PASSWORD_PROBLEMS = (
+    ("password_too_short", "user.passwordTooShort"),
+    ("password_entirely_numeric", "user.passwordNumeric"),
+    ("password_too_similar", "user.passwordSimilar"),
+    ("password_too_common", "user.passwordCommon"),
+)
+
+
+def _password_problem(password, user):
+    """Why the password is too weak, in the request's language, or None."""
+    codes = set()
+    try:
+        validate_password(password, user)
+    except ValidationError as e:
+        codes = {err.code for err in e.error_list} or {"weak"}
+    # Django's similarity check misses a short login inside a longer password ("olga2026olga").
+    login = (user.username or "").lower()
+    if len(login) >= 3 and login in password.lower():
+        codes.add("password_too_similar")
+    for code, key in _PASSWORD_PROBLEMS:
+        if code in codes:
+            return tr(key)
+    return tr("user.passwordWeak") if codes else None
+
+
+def _name(request):
+    return (request.data.get("name") or "").strip()[:150]
 
 
 def _active_admin_count(exclude_id=None):
@@ -51,7 +86,10 @@ class UserViewSet(viewsets.ModelViewSet):
             return Response({"detail": tr('user.invalidRole')}, status=status.HTTP_400_BAD_REQUEST)
         if User.objects.filter(username=username).exists():
             return Response({"detail": tr('user.alreadyExists')}, status=status.HTTP_400_BAD_REQUEST)
-        user = User.objects.create_user(username=username, password=password, is_staff=True)
+        problem = _password_problem(password, User(username=username, first_name=_name(request)))
+        if problem:
+            return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.create_user(username=username, password=password, is_staff=True, first_name=_name(request))
         self._apply_role(user, role)
         return Response(UserSerializer(user).data, status=status.HTTP_201_CREATED)
 
@@ -59,6 +97,13 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         new_role = request.data.get("role")
         new_active = request.data.get("is_active")
+        new_password = request.data.get("password")
+        if "name" in request.data:
+            user.first_name = _name(request)
+        if new_password:
+            problem = _password_problem(new_password, user)
+            if problem:
+                return Response({"detail": problem}, status=status.HTTP_400_BAD_REQUEST)
 
         # Guard: never strip the LAST admin (demote or deactivate) or self-demote/deactivate.
         demoting = new_role == "manager" and role_of(user) == "admin"
@@ -73,9 +118,13 @@ class UserViewSet(viewsets.ModelViewSet):
             self._apply_role(user, new_role)
         if new_active is not None:
             user.is_active = bool(new_active)
-        if request.data.get("password"):
-            user.set_password(request.data["password"])
+        if new_password:
+            # Ends that user's other sessions (Django checks the password hash per session);
+            # an admin changing their own password stays signed in here.
+            user.set_password(new_password)
         user.save()
+        if new_password and user.id == request.user.id:
+            update_session_auth_hash(request, user)
         return Response(UserSerializer(user).data)
 
     def destroy(self, request, *args, **kwargs):

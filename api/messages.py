@@ -134,6 +134,36 @@ MESSAGES = {
         "de": "Der letzte Administrator kann nicht gelöscht werden.",
         "uk": "Не можна видалити останнього адміністратора."
     },
+    "user.passwordTooShort": {
+        "ru": "Пароль короче 8 символов.",
+        "en": "The password is shorter than 8 characters.",
+        "de": "Das Passwort ist kürzer als 8 Zeichen.",
+        "uk": "Пароль коротший за 8 символів."
+    },
+    "user.passwordNumeric": {
+        "ru": "Пароль из одних цифр легко подобрать.",
+        "en": "A password of digits only is easy to guess.",
+        "de": "Ein Passwort nur aus Ziffern ist leicht zu erraten.",
+        "uk": "Пароль лише з цифр легко підібрати."
+    },
+    "user.passwordCommon": {
+        "ru": "Это слишком распространённый пароль.",
+        "en": "This password is too common.",
+        "de": "Dieses Passwort ist zu verbreitet.",
+        "uk": "Це надто поширений пароль."
+    },
+    "user.passwordSimilar": {
+        "ru": "Пароль слишком похож на логин или имя.",
+        "en": "The password is too similar to the login or name.",
+        "de": "Das Passwort ähnelt zu sehr dem Benutzernamen oder Namen.",
+        "uk": "Пароль надто схожий на логін або ім'я."
+    },
+    "user.passwordWeak": {
+        "ru": "Пароль слишком простой.",
+        "en": "The password is too weak.",
+        "de": "Das Passwort ist zu schwach.",
+        "uk": "Пароль надто простий."
+    },
     "auth.invalidCredentials": {
         "ru": "Неверный логин или пароль.",
         "en": "Invalid login or password.",
