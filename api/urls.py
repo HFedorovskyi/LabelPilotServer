@@ -28,6 +28,9 @@ from api.auth_views import (
 )
 from api.user_views import UserViewSet
 from api.operator_views import OperatorViewSet
+from api.system_views import (
+    BackupRestoreView, BackupsView, UpdateFileView, UpdateProgressView, UpdateView,
+)
 
 
 router = DefaultRouter()
@@ -60,6 +63,11 @@ urlpatterns = [
     path('notifications/seen/', NotificationsSeenView.as_view(), name='notifications-seen'),
     path('full_sync/', FullSyncView.as_view(), name='full-sync'),
     path('version/', VersionView.as_view(), name='version'),
+    path('system/update/', UpdateView.as_view(), name='system-update'),
+    path('system/update/file/', UpdateFileView.as_view(), name='system-update-file'),
+    path('system/update/progress/', UpdateProgressView.as_view(), name='system-update-progress'),
+    path('system/backups/', BackupsView.as_view(), name='system-backups'),
+    path('system/backups/<str:backup_id>/restore/', BackupRestoreView.as_view(), name='system-backup-restore'),
     path('license/', LicenseView.as_view(), name='license'),
     path('license/import/', LicenseImportView.as_view(), name='license-import'),
     path('license/refresh/', LicenseRefreshView.as_view(), name='license-refresh'),

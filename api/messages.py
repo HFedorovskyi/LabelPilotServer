@@ -176,6 +176,18 @@ MESSAGES = {
         "de": "Zu viele Fehlversuche. Die Anmeldung von diesem Computer ist gesperrt – in {minutes} Min. erneut versuchen.",
         "uk": "Забагато невдалих спроб. Вхід з цього комп’ютера закрито — спробуйте за {minutes} хв."
     },
+    "system.updaterDown": {
+        "ru": "Служба обновлений LabelPilotUpdater не отвечает.",
+        "en": "The LabelPilotUpdater update service does not answer.",
+        "de": "Der Aktualisierungsdienst LabelPilotUpdater antwortet nicht.",
+        "uk": "Служба оновлень LabelPilotUpdater не відповідає."
+    },
+    "system.noFile": {
+        "ru": "Выберите файл обновления .lpupdate.",
+        "en": "Choose a .lpupdate update file.",
+        "de": "Wählen Sie eine Aktualisierungsdatei .lpupdate.",
+        "uk": "Виберіть файл оновлення .lpupdate."
+    },
     "reset.title": {
         "ru": "LabelPilot — сброс пароля",
         "en": "LabelPilot — password reset",

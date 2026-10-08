@@ -171,3 +171,76 @@ class ResetPasswordCommandTests(TestCase):
         text = out.getvalue()
         self.assertIn("из одних цифр", text)
         self.assertIn("теперь администратор", text)
+
+
+class SystemProxyTests(TestCase):
+    """«Настройки» reach the updater (127.0.0.1:9000) only through these admin-checked views."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        ensure_groups()
+        self.admin = User.objects.create_user("chief", password=GOOD)
+        self.admin.groups.add(Group.objects.get(name="admin"))
+        self.manager = User.objects.create_user("olga", password=GOOD)
+        self.manager.groups.add(Group.objects.get(name="manager"))
+        self.client = APIClient()
+
+    def fake(self, status_code=200, body=None):
+        from unittest import mock
+        res = mock.Mock(status_code=status_code, ok=200 <= status_code < 300, text="")
+        res.json.return_value = body or {}
+        return res
+
+    def test_only_admins_start_updates_backups_and_rollbacks(self):
+        from unittest import mock
+        self.client.force_authenticate(self.manager)
+        with mock.patch("api.system_views.requests.request") as call:
+            self.assertEqual(self.client.post("/api/v1/system/update/").status_code, 403)
+            self.assertEqual(self.client.post("/api/v1/system/backups/").status_code, 403)
+            self.assertEqual(self.client.post("/api/v1/system/backups/v1.1.34_20261005_180200/restore/").status_code, 403)
+            call.assert_not_called()
+        self.client.force_authenticate(self.admin)
+        with mock.patch("api.system_views.requests.request", return_value=self.fake(200, {"message": "Rollback started"})) as call:
+            res = self.client.post("/api/v1/system/backups/v1.1.34_20261005_180200/restore/")
+        self.assertEqual(res.status_code, 200)
+        self.assertEqual(call.call_args.kwargs["json"], {"backup_id": "v1.1.34_20261005_180200"})
+        self.assertTrue(call.call_args.args[1].startswith("http://127.0.0.1:9000/"))
+
+    def test_update_check_is_cached_and_says_when_the_updater_is_down(self):
+        from unittest import mock
+        import requests
+        self.client.force_authenticate(self.manager)
+        body = {"available": True, "version": "1.1.36", "changelog": "x", "published_at": "2026-10-06", "download_url": "u"}
+        with mock.patch("api.system_views.requests.request", return_value=self.fake(200, body)) as call:
+            first = self.client.get("/api/v1/system/update/").json()
+            self.client.get("/api/v1/system/update/")
+            self.assertEqual(call.call_count, 1)
+        self.assertTrue(first["available"])
+        self.assertTrue(first["has_package"])
+        from django.core.cache import cache
+        cache.clear()
+        with mock.patch("api.system_views.requests.request", side_effect=requests.ConnectionError("refused")):
+            down = self.client.get("/api/v1/system/update/").json()
+            self.assertEqual(self.client.get("/api/v1/system/backups/").status_code, 503)
+        self.assertEqual(down["updater"], "offline")
+        self.assertIsNone(down["available"])
+
+    def test_an_update_file_is_streamed_to_the_updater(self):
+        from unittest import mock
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        self.client.force_authenticate(self.admin)
+        sent = {}
+
+        def capture(method, url, timeout, data, headers):
+            sent["body"] = b"".join(data)
+            sent["type"] = headers["Content-Type"]
+            return self.fake(200, {"message": "Offline update started"})
+
+        with mock.patch("api.system_views.requests.request", side_effect=capture):
+            res = self.client.post("/api/v1/system/update/file/",
+                                   {"file": SimpleUploadedFile("LabelPilot-1.1.36.lpupdate", b"PK-signed-bytes")})
+        self.assertEqual(res.status_code, 200)
+        self.assertIn(b"PK-signed-bytes", sent["body"])
+        self.assertIn(b'filename="LabelPilot-1.1.36.lpupdate"', sent["body"])
+        self.assertTrue(sent["type"].startswith("multipart/form-data; boundary="))
