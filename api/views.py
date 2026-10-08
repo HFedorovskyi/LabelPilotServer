@@ -327,9 +327,42 @@ class LabelTemplatesViewSet(viewsets.ModelViewSet):
         _mark_products_changed(self._users(instance))
         instance.delete()
 
+def _labels_with_barcode(template_id, name):
+    """Label templates whose barcode points at this barcode template (by id, or by name in
+    templates saved before ids were stored)."""
+    found = []
+    for label in LabelTemplates.objects.all():
+        elements = label.scheme.get('elements') if isinstance(label.scheme, dict) else None
+        for el in elements or []:
+            if not isinstance(el, dict) or el.get('type') != 'barcode':
+                continue
+            ref = el.get('templateId')
+            if (ref and ref == template_id) or (not ref and name and el.get('barcodeType') == name):
+                found.append(label)
+                break
+    return found
+
+
 class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
     queryset = BarcodeTemplate.objects.all()
     serializer_class = BarcodeTemplateSerializer
+
+    # Stations get the symbology and parts of a barcode with the label templates that
+    # use it: their products count as changed, like after a tare or template edit.
+    def _mark_users(self, template_id, name):
+        from django.db.models import Q
+        labels = _labels_with_barcode(template_id, name)
+        if labels:
+            _mark_products_changed(Q(templates_pack_label__in=labels) | Q(templates_box_label__in=labels) | Q(templates_pallet_label__in=labels))
+
+    def perform_update(self, serializer):
+        old_name = serializer.instance.name
+        template = serializer.save()
+        self._mark_users(template.pk, old_name)
+
+    def perform_destroy(self, instance):
+        self._mark_users(instance.pk, instance.name)
+        instance.delete()
 
     @action(detail=False, methods=['post'])
     def generate(self, request):

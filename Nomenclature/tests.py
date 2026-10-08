@@ -89,3 +89,42 @@ class TareAndTemplateChangeTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertGreater(self.edited(self.on_tray), self.before)
         self.assertEqual(self.edited(self.other), self.before)
+
+
+class BarcodeChangeTests(TestCase):
+    """A changed barcode reaches stations with the label templates that use it."""
+
+    def setUp(self):
+        import datetime
+        from BarcodeTemplates.models import BarcodeTemplate
+        self.client = APIClient()
+        self.client.force_authenticate(get_user_model().objects.create_superuser("chief", password="x"))
+        structure = {"barcode_type": "ean13", "fields": [{"field_type": "constanta", "value": "21"}, {"field_type": "article", "length": "5"}, {"field_type": "weight_netto_pack", "length": "5"}]}
+        self.code = BarcodeTemplate.objects.create(name="Weighed", structure=structure)
+        self.other_code = BarcodeTemplate.objects.create(name="Box no.", structure={"barcode_type": "code128", "fields": [{"field_type": "box_number", "length": "12"}]})
+        by_id = LabelTemplates.objects.create(name="Pack", scheme={"elements": [{"type": "barcode", "templateId": self.code.pk, "barcodeType": "Weighed"}]})
+        by_name = LabelTemplates.objects.create(name="Old pack", scheme={"elements": [{"type": "barcode", "barcodeType": "Weighed"}]})
+        unrelated = LabelTemplates.objects.create(name="Box", scheme={"elements": [{"type": "barcode", "templateId": self.other_code.pk}]})
+        make = lambda article, **fields: Nomenclature.objects.create(name=article, article=article, exp_date=10, close_box_counter=10, **fields)
+        self.a = make("1", templates_pack_label=by_id)
+        self.b = make("2", templates_pack_label=by_name)
+        self.c = make("3", templates_box_label=unrelated)
+        self.before = self.a.edited - datetime.timedelta(hours=1)
+        Nomenclature.objects.update(edited=self.before)
+
+    def edited(self, product):
+        product.refresh_from_db()
+        return product.edited
+
+    def test_saved_barcode_marks_products_of_labels_using_it(self):
+        response = self.client.patch(f"/api/v1/barcodes/{self.code.pk}/", {"name": "Weighed 21"}, format="json")
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(self.edited(self.a), self.before)
+        self.assertGreater(self.edited(self.b), self.before)
+        self.assertEqual(self.edited(self.c), self.before)
+
+    def test_deleted_barcode_marks_its_products(self):
+        self.assertEqual(self.client.delete(f"/api/v1/barcodes/{self.code.pk}/").status_code, 204)
+        self.assertGreater(self.edited(self.a), self.before)
+        self.assertEqual(self.edited(self.c), self.before)
+
