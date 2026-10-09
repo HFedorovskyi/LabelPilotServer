@@ -1,3 +1,2 @@
-from .celery import app as celery_app
-
-__all__ = ('celery_app',)
+# Celery removed — the server has no background-task tier.
+# Station offline-marking lives in label_stations/management/commands/run_discovery.py.

@@ -1,0 +1,2 @@
+# Windows scripts keep CRLF in checkouts and in release archives (git archive).
+*.cmd text eol=crlf

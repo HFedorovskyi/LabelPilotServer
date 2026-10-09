@@ -1,3 +1,4 @@
+import os
 import socket
 import json
 import time
@@ -10,6 +11,10 @@ from common.utils import get_local_ip
 
 DISCOVERY_PORT = 5555
 BROADCAST_IP = '255.255.255.255'
+# Slint stations (2.x) are heard only by their ping, once a minute; Tauri ones also announce
+# themselves every 3 s. Two missed pings and a margin before a station counts as offline —
+# 30 s made every 2.x station flip offline/online each minute.
+OFFLINE_AFTER_SECONDS = 150
 
 class Command(BaseCommand):
     help = 'Runs the UDP Discovery Service for finding Stations'
@@ -27,12 +32,29 @@ class Command(BaseCommand):
             self.stdout.write(self.style.ERROR(f"Error binding to port {DISCOVERY_PORT}: {e}"))
             return
 
+        # Advertise the server over mDNS so LAN clients can use http://labelpilot.local:8000
+        self.start_mdns()
+
         # Start Receive Thread
         receive_thread = threading.Thread(target=self.listen_for_stations, args=(sock,), daemon=True)
         receive_thread.start()
 
         # Start Broadcast Loop
         self.broadcast_loop(sock)
+
+    def start_mdns(self):
+        """Advertise the server over mDNS so LAN clients can reach http://<host>.local:<port>
+        without renaming the PC or editing client hosts files. Best-effort and non-fatal:
+        the network may block mDNS (UDP 5353)."""
+        from label_stations.mdns import Responder
+        try:
+            host = os.getenv("MDNS_HOSTNAME", "labelpilot").strip().lower()
+            port = int(os.getenv("PORT", "8000"))
+            self._mdns = Responder(host, port, ip_lookup=get_local_ip)  # keep a ref
+            ip = self._mdns.start()
+            self.stdout.write(self.style.SUCCESS(f"mDNS: advertising http://{host}.local:{port}/ -> {ip}"))
+        except Exception as e:
+            self.stdout.write(self.style.ERROR(f"mDNS registration failed (non-fatal): {e}"))
 
     def broadcast_loop(self, sock):
         while True:
@@ -41,7 +63,7 @@ class Command(BaseCommand):
                 self.cleanup_offline_stations()
 
                 # Get local IP (best guess)
-                local_ip = self.get_local_ip()
+                local_ip = get_local_ip()
                 
                 msg = json.dumps({
                     "type": "LABELPILOT_SERVER",
@@ -60,7 +82,7 @@ class Command(BaseCommand):
         from django.utils import timezone
         from datetime import timedelta
         
-        threshold = timezone.now() - timedelta(seconds=30)
+        threshold = timezone.now() - timedelta(seconds=OFFLINE_AFTER_SECONDS)
         # Mark as offline if changed_at is older than threshold AND currently online
         updated_count = LabelsStations.objects.filter(
             is_online=True, 
@@ -91,50 +113,64 @@ class Command(BaseCommand):
         name = msg.get('name', f"Station {ip}")
         port = msg.get('port', 5000)
         
-        station = None
-
+        # station_uuid is a UUIDField. An announcement may carry a NON-UUID id — e.g. a
+        # client in built-in demo mode broadcasts 'demo-0000-...'. Using it in a query (or
+        # create) raises ValidationError, which previously crashed this handler BEFORE the
+        # IP fallback and spammed the log every 3s. Treat any non-UUID id as "no id": match
+        # the station by IP instead (so the real station still goes online), and mint a
+        # fresh uuid if we must create.
+        valid_uuid = False
         if station_id:
             try:
-                station = LabelsStations.objects.get(station_uuid=station_id)
-            except LabelsStations.DoesNotExist:
-                pass
-        
-        if not station:
-            # Fallback to IP search
+                uuid.UUID(str(station_id))
+                valid_uuid = True
+            except (ValueError, AttributeError, TypeError):
+                valid_uuid = False
+
+        station = None
+        if valid_uuid:
+            station = LabelsStations.objects.filter(station_uuid=station_id).first()
+        elif ip:
+            # Only an announcement WITHOUT a usable UUID (built-in demo) is reconciled by
+            # IP. A real station with an unknown UUID is a new station: matching it by IP
+            # would merge it into whichever station previously had that DHCP address.
             station = LabelsStations.objects.filter(station_ip=ip).first()
 
+        from licensing import seats
         if station:
-            # Update existing
-            # ... (omitted similar logic)
+            fingerprint = seats.observe_fingerprint(station, msg.get('fingerprint'), 'discovery')
+            if fingerprint == seats.FINGERPRINT_CONFLICT:
+                # A second device reuses this station's identity (copied data folder):
+                # it never takes over the station's address; the admin sees the conflict.
+                print(f"[LICENSE] Identity conflict for station {station.station_name} from {ip}.")
+                return
             station.station_ip = ip
             station.station_name = name
             station.station_port = port
             station.is_online = True
             station.save()
         else:
-            # Create new
-            generated_uuid = station_id if station_id else uuid.uuid4()
-            print(f"[DEBUG] Creating new station. IP={ip}, Name={name}, Port={port}, UUID={generated_uuid} (Type: {type(generated_uuid)})")
-            
+            # A station over the seat cap is registered as pending (visible to the admin,
+            # no data until a seat is free). No license -> unlimited demo registration.
+            state = seats.initial_state()
+            if state is None:
+                print(f"[LICENSE] Too many stations waiting for a seat - not registering {ip} ({name}).")
+                return
+            generated_uuid = station_id if valid_uuid else uuid.uuid4()
+            from django.utils import timezone
             try:
-                LabelsStations.objects.create(
+                created = LabelsStations.objects.create(
                     station_ip=ip,
                     station_name=name,
                     station_port=port,
                     station_uuid=generated_uuid,
-                    is_online=True
+                    is_online=state == seats.SEAT_ACTIVE,
+                    seat_state=state,
+                    seat_changed_at=timezone.now(),
+                    station_fingerprint=seats.valid_fingerprint(msg.get('fingerprint')) or '',
                 )
-                print(f"[DEBUG] Successfully created station with UUID {generated_uuid}")
+                seats.record_registration(created, actor='discovery')
             except Exception as e:
-                print(f"[ERROR] Failed to create station with UUID {generated_uuid}: {e}")
-                # Try creating explicitly with save() to debug
-                s = LabelsStations(
-                    station_ip=ip,
-                    station_name=name,
-                    station_port=port,
-                    station_uuid=generated_uuid,
-                    is_online=True
-                )
-                s.save()
+                print(f"[ERROR] Failed to register station from {ip} ({name}): {e}")
 
 
