@@ -11,6 +11,10 @@ from common.utils import get_local_ip
 
 DISCOVERY_PORT = 5555
 BROADCAST_IP = '255.255.255.255'
+# Slint stations (2.x) are heard only by their ping, once a minute; Tauri ones also announce
+# themselves every 3 s. Two missed pings and a margin before a station counts as offline —
+# 30 s made every 2.x station flip offline/online each minute.
+OFFLINE_AFTER_SECONDS = 150
 
 class Command(BaseCommand):
     help = 'Runs the UDP Discovery Service for finding Stations'
@@ -78,7 +82,7 @@ class Command(BaseCommand):
         from django.utils import timezone
         from datetime import timedelta
         
-        threshold = timezone.now() - timedelta(seconds=30)
+        threshold = timezone.now() - timedelta(seconds=OFFLINE_AFTER_SECONDS)
         # Mark as offline if changed_at is older than threshold AND currently online
         updated_count = LabelsStations.objects.filter(
             is_online=True, 

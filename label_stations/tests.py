@@ -196,6 +196,23 @@ class DiscoveryTests(TestCase):
         self.assertEqual(line.conflict_fingerprint, FINGERPRINT_B)
 
 
+class OfflineCleanupTests(TestCase):
+    def test_a_station_between_two_pings_stays_online(self):
+        from django.utils import timezone
+
+        line = station("Line 1", fingerprint=FINGERPRINT_A)
+        quiet = station("Line 2", fingerprint=FINGERPRINT_B)
+        LabelsStations.objects.filter(pk__in=[line.pk, quiet.pk]).update(is_online=True)
+        # A 2.x station pings once a minute: 100 s without a ping is one missed ping.
+        LabelsStations.objects.filter(pk=line.pk).update(changed_at=timezone.now() - datetime.timedelta(seconds=100))
+        LabelsStations.objects.filter(pk=quiet.pk).update(changed_at=timezone.now() - datetime.timedelta(seconds=180))
+        DiscoveryCommand().cleanup_offline_stations()
+        line.refresh_from_db()
+        quiet.refresh_from_db()
+        self.assertTrue(line.is_online)
+        self.assertFalse(quiet.is_online)
+
+
 class StationEndpointTests(TestCase):
     def setUp(self):
         self.client = APIClient()
