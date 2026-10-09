@@ -21,6 +21,8 @@ from api.views import (
     LicenseSeatListImportView,
 )
 from api.statistics_views import StatisticsView, StationLabelsView, StationsTodayView
+from api.production import (ProductionSettingsView, ProductionTodayView, StationDaysView, StationJournalView,
+                            StationLabelsPeriodView, StationStatsView)
 from api.search_views import SearchView
 from notifications.views import NotificationsView, NotificationsSeenView
 from api.auth_views import (
@@ -58,6 +60,12 @@ urlpatterns = [
     path('statistics/', StatisticsView.as_view(), name='statistics'),
     path('statistics/station_labels/', StationLabelsView.as_view(), name='station-labels'),
     path('statistics/stations_today/', StationsTodayView.as_view(), name='stations-today'),
+    path('production/today/', ProductionTodayView.as_view(), name='production-today'),
+    path('production/settings/', ProductionSettingsView.as_view(), name='production-settings'),
+    path('stations/<uuid:uuid>/stats/', StationStatsView.as_view(), name='station-stats'),
+    path('stations/<uuid:uuid>/days/', StationDaysView.as_view(), name='station-days'),
+    path('stations/<uuid:uuid>/labels/', StationLabelsPeriodView.as_view(), name='station-labels-period'),
+    path('stations/<uuid:uuid>/journal/', StationJournalView.as_view(), name='station-journal'),
     path('search/', SearchView.as_view(), name='search'),
     path('notifications/', NotificationsView.as_view(), name='notifications'),
     path('notifications/seen/', NotificationsSeenView.as_view(), name='notifications-seen'),

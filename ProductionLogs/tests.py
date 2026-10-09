@@ -65,7 +65,10 @@ class TopProductsTodayTests(TestCase):
         for _ in range(3):
             label(line, midnight - datetime.timedelta(minutes=5), 100, "Yesterday")
 
-        data = APIClient().get("/api/v1/statistics/").json()
+        client = APIClient()
+        # The dashboard statistics are for signed-in users only.
+        client.force_authenticate(get_user_model().objects.create_user("viewer", password="luna-kora-47"))
+        data = client.get("/api/v1/statistics/").json()
 
         self.assertEqual(data["top_products_today"], [{"name": "Ham", "count": 2}, {"name": "Salami", "count": 1}])
         self.assertEqual(data["top_products"][0], {"name": "Yesterday", "count": 3})

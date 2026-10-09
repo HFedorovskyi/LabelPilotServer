@@ -1,6 +1,5 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework.permissions import AllowAny
 from django.utils import timezone
 from django.db.models import Count, Sum, F, FloatField, Q, Case, When, Min, Max
 from django.db.models.functions import Coalesce, TruncHour, TruncDate, NullIf
@@ -34,7 +33,6 @@ def net_weight_expr():
 
 
 class StatisticsView(APIView):
-    permission_classes = [AllowAny]
 
     def get(self, request):
         today = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
@@ -273,7 +271,6 @@ class StationLabelsView(APIView):
     """Per-station marking detail — each printed/deleted label (pack) with time, operator,
     product, weight and deletion state. Powers the dashboard's per-station drill-down for full
     traceability. Paginated (limit/offset, newest first) and scopeable (today | all)."""
-    permission_classes = [AllowAny]
 
     def get(self, request):
         station_id = request.query_params.get('station_id')

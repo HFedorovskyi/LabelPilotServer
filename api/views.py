@@ -937,6 +937,7 @@ class StationsViewSet(viewsets.ModelViewSet):
                 'production_date': it.get('production_date') or '',
                 'expiration_date': it.get('expiration_date') or '',
                 'barcode': it.get('barcode') or '',
+                'box_number': str(it.get('box_number') or '')[:64],
             }
 
         # --- Printed labels: skip ids already stored, batch-resolve product/pack FKs ---
@@ -1027,6 +1028,9 @@ class StationsViewSet(viewsets.ModelViewSet):
                     is_deleted=True,
                     deleted_at=parse_datetime(it.get('deleted_at') or '') or tz.now(),
                 )
+            # Boxes and pallets (stations from 2.0.9).
+            from api.production import store_containers
+            store_containers(station, data)
             if station:
                 station.last_sync_at = tz.now()
                 station.save(update_fields=['last_sync_at', 'changed_at'])
