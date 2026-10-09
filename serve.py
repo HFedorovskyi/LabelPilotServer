@@ -22,6 +22,9 @@ def main() -> None:
     # «LabelPilot — сброс пароля» in the Start menu, also for installs updated by .lpupdate.
     from api.start_menu import ensure_in_background
     ensure_in_background()
+    # An updater left on old code by an update it applied gets restarted once it is idle.
+    from api import updater_upkeep
+    updater_upkeep.ensure_in_background()
     serve(application, host=host, port=port, threads=threads)
 
 

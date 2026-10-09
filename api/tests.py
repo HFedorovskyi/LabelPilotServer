@@ -256,3 +256,32 @@ class LicenceRefreshRecordTests(TestCase):
 
     def test_no_licence_file_is_reported_as_none(self):
         self.assertEqual(APIClient().get("/api/v1/license/").json()["license_file"], "none")
+
+
+class UpdaterUpkeepTests(TestCase):
+    """After an update from 1.1.34 the old updater keeps running; the server restarts it once idle."""
+
+    def answers(self, status, progress=None):
+        from unittest import mock
+
+        def get(url, timeout):
+            body = status if url.endswith("/status") else (progress or {"status": "idle"})
+            return mock.Mock(json=mock.Mock(return_value=body))
+        return get
+
+    def test_restarts_an_old_idle_updater_and_leaves_the_rest(self):
+        from unittest import mock
+        import requests
+        from api import updater_upkeep as u
+        done = mock.Mock(returncode=0, stderr=b"")
+        with mock.patch.object(u.requests, "get", side_effect=self.answers({"service": "LabelPilot Updater"})), \
+                mock.patch.object(u, "NSSM", mock.Mock(exists=mock.Mock(return_value=True), __str__=lambda s: "nssm.exe")), \
+                mock.patch.object(u.subprocess, "run", return_value=done) as run:
+            self.assertEqual(u.check_once(), "restarted")
+        self.assertEqual(run.call_args.args[0][1:], ["restart", "LabelPilotUpdater"])
+        with mock.patch.object(u.requests, "get", side_effect=self.answers({"api": 2})):
+            self.assertEqual(u.check_once(), "current")
+        with mock.patch.object(u.requests, "get", side_effect=self.answers({}, {"status": "running"})):
+            self.assertEqual(u.check_once(), "busy")
+        with mock.patch.object(u.requests, "get", side_effect=requests.ConnectionError("refused")):
+            self.assertEqual(u.check_once(), "down")
