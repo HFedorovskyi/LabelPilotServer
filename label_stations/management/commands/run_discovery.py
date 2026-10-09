@@ -41,26 +41,13 @@ class Command(BaseCommand):
     def start_mdns(self):
         """Advertise the server over mDNS so LAN clients can reach http://<host>.local:<port>
         without renaming the PC or editing client hosts files. Best-effort and non-fatal:
-        skips silently if zeroconf is unavailable or the network blocks mDNS (UDP 5353)."""
+        the network may block mDNS (UDP 5353)."""
+        from label_stations.mdns import Responder
         try:
-            from zeroconf import Zeroconf, ServiceInfo
-        except ImportError:
-            self.stdout.write("zeroconf not installed - skipping mDNS (.local) advertising")
-            return
-        try:
-            ip = get_local_ip()
             host = os.getenv("MDNS_HOSTNAME", "labelpilot").strip().lower()
             port = int(os.getenv("PORT", "8000"))
-            info = ServiceInfo(
-                "_http._tcp.local.",
-                "LabelPilot Server._http._tcp.local.",
-                addresses=[socket.inet_aton(ip)],
-                port=port,
-                properties={b"path": b"/"},
-                server=f"{host}.local.",
-            )
-            self._zeroconf = Zeroconf()            # keep a ref so it isn't garbage-collected
-            self._zeroconf.register_service(info)
+            self._mdns = Responder(host, port, ip_lookup=get_local_ip)  # keep a ref
+            ip = self._mdns.start()
             self.stdout.write(self.style.SUCCESS(f"mDNS: advertising http://{host}.local:{port}/ -> {ip}"))
         except Exception as e:
             self.stdout.write(self.style.ERROR(f"mDNS registration failed (non-fatal): {e}"))
