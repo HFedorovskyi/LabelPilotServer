@@ -26,7 +26,6 @@ from LabelTemplates.models import LabelTemplates
 from BarcodeTemplates.models import BarcodeTemplate
 from label_stations.models import LabelsStations
 import socket
-import treepoem
 import io
 import base64
 import json
@@ -390,12 +389,10 @@ class BarcodeTemplatesViewSet(viewsets.ModelViewSet):
 
         try:
             generator = BarcodeGenerator()
-            image_base64, data_string, warnings = generator.generate_image_base64(
-                structure, product=test_product
-            )
+            barcode_type, data_string, warnings = generator.prepare(structure, product=test_product)
             return Response({
                 'success': True,
-                'png': image_base64,
+                'barcode_type': barcode_type,
                 'data_string': data_string,
                 'warnings': warnings,
             })

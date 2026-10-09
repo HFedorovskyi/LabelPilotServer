@@ -1,6 +1,3 @@
-import treepoem
-import io
-import base64
 import json
 from datetime import datetime, timedelta
 from api.i18n import tr
@@ -161,11 +158,13 @@ class BarcodeGenerator:
 
         self.AI_presence = False
 
-    def generate_image_base64(self, structure_data, product=None):
-        """Render the barcode PNG.
+    def prepare(self, structure_data, product=None):
+        """The barcode type and the data string to encode, as the admin panel draws them.
 
-        Returns a tuple: (image_base64, data_string, warnings).
-        Raises ValueError on render-time failures (e.g. invalid EAN13 payload).
+        The picture itself is drawn in the browser with bwip-js (the same BWIPP encoders
+        the server used through treepoem and Ghostscript, without Ghostscript's AGPL).
+        Returns a tuple: (barcode_type, data_string, warnings).
+        Raises ValueError on invalid data (e.g. an EAN13 payload that is not 12 digits).
         """
         # Handle stringified JSON (legacy storage / loose callers).
         if isinstance(structure_data, str):
@@ -208,33 +207,7 @@ class BarcodeGenerator:
 
             barcode_data = self.calculate_ean13_checksum(ean_payload)
 
-        is_2d = barcode_type in TWO_D_BARCODE_TYPES
-
-        if is_2d:
-            barcode_options = {
-                'dpi': '203',
-                'includetext': False,
-            }
-        else:
-            barcode_options = {
-                'dpi': '203',
-                'includetext': True,
-                'textfont': 'Helvetica',
-                'textsize': '10',
-                'textyoffset': '-10',
-                'width': '5'
-            }
-
-        barcode_image = treepoem.generate_barcode(
-            barcode_type=barcode_type,
-            data=barcode_data,
-            options=barcode_options
-        )
-
-        buffer = io.BytesIO()
-        barcode_image.save(buffer, format='PNG')
-        image_base64 = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        return image_base64, barcode_data, warnings
+        return barcode_type, barcode_data, warnings
 
     def decode_structure_barcode(self, structure, product=None, barcode_type='ean13'):
         """Assemble the barcode data string from the structure fields.
