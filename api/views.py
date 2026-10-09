@@ -947,21 +947,21 @@ class StationsViewSet(viewsets.ModelViewSet):
             uids = [it['unique_id'] for it in labels_data]
             seen = set(PrintedLabel.objects.filter(unique_id__in=uids).values_list('unique_id', flat=True))
             prods = Nomenclature.objects.in_bulk({it['product_id'] for it in labels_data if it.get('product_id')})
-            packs = Pack.objects.in_bulk({it['pack_id'] for it in labels_data if it.get('pack_id')})
             for it in labels_data:
                 uid = it['unique_id']
                 if uid in seen:
                     continue
                 seen.add(uid)  # also dedupes within this one payload
                 prod = prods.get(it.get('product_id'))
-                pack = packs.get(it.get('pack_id'))
                 new_labels.append(PrintedLabel(
                     station=station,
                     station_user_name=it.get('user_name', ''),
                     product=prod,
                     product_name_snapshot=it.get('product_name', '') or (prod.name if prod else ''),
-                    pack=pack,
-                    pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
+                    # A station's "pack" is its own weighed pack row (number in pack_name), not
+                    # a tare from «Упаковка и тара»: its id must not be looked up as a Pack.
+                    pack=None,
+                    pack_name_snapshot=it.get('pack_name', '') or '',
                     unique_id=uid,
                     printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
                     **_audit(it),
@@ -994,21 +994,21 @@ class StationsViewSet(viewsets.ModelViewSet):
         if deleted_data:
             seen_d = set(PrintedLabel.objects.filter(unique_id__in=deleted_uids).values_list('unique_id', flat=True))
             dprods = Nomenclature.objects.in_bulk({it['product_id'] for it in deleted_data if it.get('product_id')})
-            dpacks = Pack.objects.in_bulk({it['pack_id'] for it in deleted_data if it.get('pack_id')})
             for it in deleted_data:
                 uid = it['unique_id']
                 if uid in seen_d:
                     continue
                 seen_d.add(uid)
                 prod = dprods.get(it.get('product_id'))
-                pack = dpacks.get(it.get('pack_id'))
                 new_labels.append(PrintedLabel(
                     station=station,
                     station_user_name=it.get('user_name', ''),
                     product=prod,
                     product_name_snapshot=it.get('product_name', '') or (prod.name if prod else ''),
-                    pack=pack,
-                    pack_name_snapshot=it.get('pack_name', '') or (pack.name if pack else ''),
+                    # A station's "pack" is its own weighed pack row (number in pack_name), not
+                    # a tare from «Упаковка и тара»: its id must not be looked up as a Pack.
+                    pack=None,
+                    pack_name_snapshot=it.get('pack_name', '') or '',
                     unique_id=uid,
                     printed_at=parse_datetime(it.get('printed_at') or '') or tz.now(),
                     **_audit(it),
@@ -1041,7 +1041,10 @@ class StationsViewSet(viewsets.ModelViewSet):
 
         labels_count, logs_count, deleted_count = len(new_labels), len(new_logs), len(deleted_data)
         station_label = station.station_name if station else station_uuid
-        log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {deleted_count} отвесов, {logs_count} логов')
+        # Stations push a report every few dozen seconds while they print; only a report an
+        # admin uploads by hand (.lpr from USB) is an event worth the activity list.
+        if request.user.is_authenticated:
+            log_event('report_imported', f'Импортирован отчёт со станции «{station_label}»: {labels_count} этикеток, {deleted_count} отвесов, {logs_count} логов')
 
         return Response({
             'status': 'success',

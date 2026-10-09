@@ -171,6 +171,27 @@ class StationEventTests(TestCase):
         self.assertEqual((self.job.printed_qty, self.job.status), (10, "completed"))
         self.assertEqual(Notification.objects.get(code="job.completed").severity, "info")
 
+    def test_pushed_reports_stay_out_of_the_activity_list_and_never_link_a_tare(self):
+        from Packs.models import Pack
+        from ProductionLogs.models import PrintedLabel
+        from server_activity.models import ServerEvent
+        tare = Pack.objects.create(name="Лоток 0,5 кг")
+        label = {"unique_id": f"{self.line.station_uuid}-pack-{tare.pk}", "station_pack_id": tare.pk,
+                 "pack_id": tare.pk, "pack_name": "000017", "product_id": self.job.nomenclature_id,
+                 "printed_at": timezone.now().isoformat()}
+        self.upload({"station_uuid": str(self.line.station_uuid), "printed_labels": [label]})
+        stored = PrintedLabel.objects.get(unique_id=label["unique_id"])
+        # The station's own pack row id is not a tare id, even when the numbers match.
+        self.assertIsNone(stored.pack)
+        self.assertEqual(stored.pack_name_snapshot, "000017")
+        self.assertFalse(ServerEvent.objects.filter(action="report_imported").exists())
+
+        # A report an admin uploads by hand (.lpr from USB) is listed.
+        admin = get_user_model().objects.create_superuser("chief", password="x")
+        self.client.force_authenticate(admin)
+        self.upload({"station_uuid": str(self.line.station_uuid), "printed_labels": [dict(label, unique_id="other-1")]})
+        self.assertEqual(ServerEvent.objects.filter(action="report_imported").count(), 1)
+
     def test_rejected_report_is_critical(self):
         with mock.patch("common.crypto_utils.decrypt_data", side_effect=ValueError("bad")):
             response = self.client.post("/api/v1/stations/upload_report/", {"file": SimpleUploadedFile("r.lpr", b"x")})
